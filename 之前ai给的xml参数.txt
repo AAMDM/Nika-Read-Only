@@ -1,0 +1,185 @@
+XML 大改（核心！分 8 刀，每刀贴完点 Apply）
+ 
+VM 列表双击 win10 → View → Details → 左侧 Overview → XML 标签页。
+ 
+第 1 刀：开头加 qemu 命令行（存储伪装 SATA 控制器）
+ 
+把  <domain type="kvm">  这一行替换为：
+ 
+xml
+  
+
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+    <qemu:commandline>
+      <qemu:arg value="-device"/>
+      <qemu:arg value="ahci,id=device-sata1,addr=07.0"/>
+      <qemu:arg value="-drive"/>
+      <qemu:arg value="file=/var/lib/libvirt/images/win10.img,format=raw,cache=none,discard=ignore,if=none,id=drive-sata1-0"/>
+      <qemu:arg value="-device"/>
+      <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,serial=WXA21ACX"/>
+ 
+ 
+第 2 刀：SMBIOS 全家桶（你的 Acer 数据）
+ 
+紧接着上面（ </qemu:commandline>  之前）插入：
+ 
+xml
+  
+
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=1,manufacturer=Acer,product=Nitro AN715-51,version=V1.29,serial=NHQ5FCN0039204EA7C212B00,uuid=7a0b9bb8-ba68-e911-80cf-51b2c3d4e5f6,sku=0000000000000000,family=Nitro 7"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=2,manufacturer=CFL,product=Citigo_CFS,version=V1.29,serial=NBQ591100T7488BC2A93100"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=3,manufacturer=Acer,version=V1.29,serial=NHQ5FCN0039204EA7C212B00"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=8300,current-speed=2574"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=17,manufacturer=Kingston,part=ACR26D4S9S8ME-8,speed=2667,serial=E4370112"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=17,manufacturer=SK Hynix,part=HMA81GS6CJR8N-VK,speed=2667,serial=2C702063"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Keyboard,connector_type=0x0F,port_type=0x0D"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Mouse,connector_type=0x0F,port_type=0x0E"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=9,slot_designation=J6C1,slot_type=0xAA,slot_data_bus_width=0x0D,current_usage=0x04,slot_length=0x04,slot_id=0x01,slot_characteristics1=0x04,slot_characteristics2=0x03"/>
+ 
+ 
+第 3 刀：ACPI 表 + 伪装 QEMU 路径
+ 
+同在  </qemu:commandline>  前，继续追加：
+ 
+xml
+  
+
+      <qemu:arg value="-acpitable"/>
+      <qemu:arg value="file=/usr/local/bin/ssdt1.aml"/>
+      <qemu:arg value="-acpitable"/>
+      <qemu:arg value="file=/usr/local/bin/ssdt2.aml"/>
+    </qemu:commandline>
+    <qemu:capabilities>
+      <qemu:del capability=" seabios-menu" prowa="no"/>
+    </qemu:capabilities>
+    <qemu:override device="display" alias="video0">
+      <qemu:frontend_opts>
+        <qemu:opt key="edid" value="false"/>
+      </qemu:frontend_opts>
+    </qemu:override>
+ 
+ 
+⚠️ 注意：第 3 刀里  <qemu:capabilities>  那段我按项目文件结构写的，不同 libvirt 版本语法略有差异，如果 Apply 报错就把 capabilities 和 override 两段先删掉（只留 acpitable 四行），先跑通主线。报错原文贴给我。
+ 
+第 4 刀：metadata（藏 hypervisor 位）
+ 
+找到  </metadata> ，替换为：
+ 
+xml
+  
+
+    <vmware xmlns="http://www.vmware.com/schema/vmware.config">
+      <config>
+        <entry name="hypervisor.cpuid.v0" value="FALSE"/>
+      </config>
+    </vmware>
+  </metadata>
+ 
+ 
+第 5 刀：内存 + vCPU（16GB 机器 → VM 给 12GB）
+ 
+把  <memory ...>  到  <vcpu ...>  的整块替换：
+ 
+xml
+  
+
+  <memory unit="GiB">12</memory>
+  <currentMemory unit="GiB">12</currentMemory>
+  <vcpu placement="static">10</vcpu>
+ 
+ 
+第 6 刀：features + cpu + clock（反检测核心）
+ 
+把  <features>  到  </clock>  整块替换（Intel 版，无 AMD 特性）：
+ 
+xml
+  
+
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode="custom">
+      <relaxed state="off"/><vapic state="off"/><spinlocks state="off"/>
+      <vpindex state="off"/><runtime state="off"/><synic state="off"/>
+      <stimer state="off"/><reset state="off"/><vendor_id state="off"/>
+      <frequencies state="off"/><reenlightenment state="off"/><tlbflush state="off"/>
+      <ipi state="off"/><evmcs state="off"/><avic state="off"/>
+    </hyperv>
+    <kvm><hidden state="on"/></kvm>
+    <ioapic driver="kvm"/>
+    <msrs unknown="fault"/>
+    <pmu state="on"/>
+    <smm state="on"/>
+    <vmport state="off"/>
+    <ps2 state="on"/>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="off">
+    <topology sockets="1" dies="1" cores="5" threads="2"/>
+    <cache mode="passthrough"/>
+    <feature policy="disable" name="hypervisor"/>
+    <feature policy="require" name="vmx"/>
+    <feature policy="require" name="x2apic"/>
+    <feature policy="require" name="spec-ctrl"/>
+    <feature policy="require" name="stibp"/>
+    <feature policy="require" name="ssbd"/>
+  </cpu>
+  <clock offset="localtime">
+    <timer name="tsc" present="yes" tickpolicy="discard" mode="native"/>
+    <timer name="hpet" present="yes"/>
+    <timer name="rtc" present="yes"/>
+    <timer name="pit" present="yes"/>
+    <timer name="kvmclock" present="no"/>
+    <timer name="hypervclock" present="no"/>
+  </clock>
+ 
+ 
+第 7 刀：memballoon（气球驱动是 VM 特征，干掉）
+ 
+ <memballoon model="virtio">...  到  </memballoon>  替换为：
+ 
+xml
+  
+
+  <memballoon model="none"/>
+ 
+ 
+第 8 刀：音频（可选，先跳过不贴也行）
+ 
+ <audio id="1" type="spice"/>  那段先不动，能启动后再改。
+ 
+4.5 GUI 里再做 4 个删除
+ 
+plaintext
+  
+
+Details 界面左侧：
+① Tablet → Remove
+② Serial 1 → Remove
+③ Channel spice → Remove
+④ Controller VirtIO Serial 0 → Remove
+ 
+ 
+4.6 删 PS/2 + 加 USB 键鼠（XML 最后两刀）
+ 
+XML 里  <input type="mouse" bus="ps2"/>  和  <input type="keyboard" bus="ps2"/>  两行删除； <ps2 state="on"/>  改成  <ps2 state="off"/> 。
+ 
+然后 Details → Add Hardware → Input → USB Mouse → Finish；再来一次 USB Keyboard。
+ 
+4.7 磁盘权限 + 启动测试
+ 
+bash
+  
+
+sudo chmod 777 /var/lib/libvirt/images/win10.img
+ 
+ 
+回 virt-manager → 点 Run 启动 win10 → 此时应该能进 Windows 安装界面（还没做 GPU 直通，走的是 QXL 虚拟显卡 + spice 窗口显示，正常现象）。
