@@ -1,0 +1,222 @@
+<domain xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0" type="kvm">
+  <name>win10</name>
+  <uuid>fb096d3c-14f6-49e3-a546-606e45230f62</uuid>
+  <metadata>
+    <vmware xmlns="http://www.vmware.com/schema/vmware.config">
+      <config>
+        <entry name="hypervisor.cpuid.v0" value="FALSE"/>
+      </config>
+    </vmware>
+  </metadata>
+  <memory unit="KiB">12582912</memory>
+  <currentMemory unit="KiB">12582912</currentMemory>
+  <vcpu placement="static">10</vcpu>
+  <os firmware="efi">
+    <type arch="x86_64" machine="pc-q35-11.0">hvm</type>
+    <firmware>
+      <feature enabled="yes" name="enrolled-keys"/>
+      <feature enabled="yes" name="secure-boot"/>
+    </firmware>
+    <loader readonly="yes" secure="yes" type="pflash" format="qcow2">/usr/share/edk2/ovmf/OVMF_CODE_4M.patched.qcow2</loader>
+    <nvram template="/usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2" templateFormat="qcow2" format="qcow2">/usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2</nvram>
+    <boot dev="hd"/>
+    <bootmenu enable="yes"/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode="custom">
+      <relaxed state="off"/>
+      <vapic state="off"/>
+      <spinlocks state="off"/>
+      <vpindex state="off"/>
+      <runtime state="off"/>
+      <synic state="off"/>
+      <stimer state="off"/>
+      <reset state="off"/>
+      <vendor_id state="off"/>
+      <frequencies state="off"/>
+      <reenlightenment state="off"/>
+      <tlbflush state="off"/>
+      <ipi state="off"/>
+      <evmcs state="off"/>
+      <avic state="off"/>
+    </hyperv>
+    <kvm>
+      <hidden state="on"/>
+    </kvm>
+    <pmu state="on"/>
+    <vmport state="off"/>
+    <smm state="on"/>
+    <ioapic driver="kvm"/>
+    <msrs unknown="fault"/>
+    <ps2 state="off"/>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="off">
+    <topology sockets="1" dies="1" clusters="1" cores="5" threads="2"/>
+    <cache mode="passthrough"/>
+    <feature policy="disable" name="hypervisor"/>
+    <feature policy="require" name="vmx"/>
+    <feature policy="require" name="x2apic"/>
+    <feature policy="require" name="spec-ctrl"/>
+    <feature policy="require" name="stibp"/>
+    <feature policy="require" name="ssbd"/>
+  </cpu>
+  <clock offset="localtime">
+    <timer name="tsc" present="yes" tickpolicy="discard" mode="native"/>
+    <timer name="hpet" present="yes"/>
+    <timer name="rtc" present="yes"/>
+    <timer name="pit" present="yes"/>
+    <timer name="kvmclock" present="no"/>
+    <timer name="hypervclock" present="no"/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled="no"/>
+    <suspend-to-disk enabled="no"/>
+  </pm>
+  <devices>
+    <emulator>/usr/local/bin/qemu-system-x86_64</emulator>
+    <controller type="usb" index="0" model="qemu-xhci" ports="15">
+      <address type="pci" domain="0x0000" bus="0x02" slot="0x00" function="0x0"/>
+    </controller>
+    <controller type="pci" index="0" model="pcie-root"/>
+    <controller type="pci" index="1" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="1" port="0x10"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x0" multifunction="on"/>
+    </controller>
+    <controller type="pci" index="2" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="2" port="0x11"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x1"/>
+    </controller>
+    <controller type="pci" index="3" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="3" port="0x12"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x2"/>
+    </controller>
+    <controller type="pci" index="4" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="4" port="0x13"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x3"/>
+    </controller>
+    <controller type="pci" index="5" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="5" port="0x14"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x4"/>
+    </controller>
+    <controller type="pci" index="6" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="6" port="0x15"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x5"/>
+    </controller>
+    <controller type="pci" index="7" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="7" port="0x16"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x6"/>
+    </controller>
+    <controller type="pci" index="8" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="8" port="0x17"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x02" function="0x7"/>
+    </controller>
+    <controller type="pci" index="9" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="9" port="0x18"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x0" multifunction="on"/>
+    </controller>
+    <controller type="pci" index="10" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="10" port="0x19"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x1"/>
+    </controller>
+    <controller type="pci" index="11" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="11" port="0x1a"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x2"/>
+    </controller>
+    <controller type="pci" index="12" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="12" port="0x1b"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x3"/>
+    </controller>
+    <controller type="pci" index="13" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="13" port="0x1c"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x4"/>
+    </controller>
+    <controller type="pci" index="14" model="pcie-root-port">
+      <model name="pcie-root-port"/>
+      <target chassis="14" port="0x1d"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x03" function="0x5"/>
+    </controller>
+    <controller type="sata" index="0">
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x1f" function="0x2"/>
+    </controller>
+    <interface type="network">
+      <mac address="52:54:00:80:40:a6"/>
+      <source network="default"/>
+      <model type="e1000e"/>
+      <address type="pci" domain="0x0000" bus="0x01" slot="0x00" function="0x0"/>
+    </interface>
+    <input type="mouse" bus="usb">
+      <address type="usb" bus="0" port="1"/>
+    </input>
+    <input type="keyboard" bus="usb">
+      <address type="usb" bus="0" port="4"/>
+    </input>
+    <graphics type="spice" autoport="yes">
+      <listen type="address"/>
+      <image compression="off"/>
+    </graphics>
+    <sound model="ich9">
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x1b" function="0x0"/>
+    </sound>
+    <audio id="1" type="spice"/>
+    <video>
+      <model type="vga" vram="16384" heads="1" primary="yes"/>
+      <address type="pci" domain="0x0000" bus="0x00" slot="0x01" function="0x0"/>
+    </video>
+    <redirdev bus="usb" type="spicevmc">
+      <address type="usb" bus="0" port="2"/>
+    </redirdev>
+    <redirdev bus="usb" type="spicevmc">
+      <address type="usb" bus="0" port="3"/>
+    </redirdev>
+    <watchdog model="itco" action="reset"/>
+    <memballoon model="none"/>
+  </devices>
+  <qemu:commandline>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ahci,id=device-sata1,addr=07.0"/>
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/var/lib/libvirt/images/win10.img,format=raw,cache=none,discard=ignore,if=none,id=drive-sata1-0"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,bootindex=2,serial=WXA21ACX"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=1,manufacturer=Acer,product=Nitro AN715-51,version=V1.29,serial=NHQ5FCN0039204EA7C212B00,uuid=7a0b9bb8-ba68-e911-80cf-51b2c3d4e5f6,sku=0000000000000000,family=Nitro 7"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=2,manufacturer=CFL,product=Citigo_CFS,version=V1.29,serial=NBQ591100T7488BC2A93100"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=3,manufacturer=Acer,version=V1.29,serial=NHQ5FCN0039204EA7C212B00"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=8300,current-speed=2673"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=17,manufacturer=Kingston,part=ACR26D4S9S8ME-8,speed=2667,serial=E4370112"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=17,manufacturer=SK Hynix,part=HMA81GS6CJR8N-VK,speed=2667,serial=2C702063"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Keyboard,connector_type=0x0F,port_type=0x0D"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Mouse,connector_type=0x0F,port_type=0x0E"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=9,slot_designation=J6C1,slot_type=0xAA,slot_data_bus_width=0x0D,current_usage=0x04,slot_length=0x04,slot_id=0x01,slot_characteristics1=0x04,slot_characteristics2=0x03"/>
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt1.aml"/>
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt2.aml"/>
+  </qemu:commandline>
+</domain>
