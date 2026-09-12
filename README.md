@@ -112,6 +112,7 @@ chmod +x headless.sh
 <details>
   <summary>Hardware decoder with <b>Intel Skylake</b> and newer:</summary>
 
+    sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
     sudo dnf install intel-media-driver
 </details>
 
@@ -229,10 +230,10 @@ sudo virsh net-autostart default
 
 - Manual install >> `win10` >> Choose Memory and CPU settings >> _uncheck_ [ ] Enable storage for this virtual machine >> _check_ [x] Customize configuration before install >> [Finish]
   - Overview >> Chipset: Q35, **Firmware**: OVMF_CODE_4M.secboot >> [Apply]
+  - NIC :xx:xx:xx >> Device model: rtl8125 >> **(type it in)** >> MAC address: YOUR_MAC_HERE >> [Apply]
+  - Video QXL >> Model: VGA >> [Apply]
   - [Add Hardware] >> Storage >> Select or create custom storage >> [Manage...] >> [+] >> `win10`.img >> Capacity: 240 GiB >> [Finish] >> [Cancel] >> [Cancel]
   - [Begin Installation] >> Virtual Machine >> Shut Down >> Force Off
-
-- Virtual Machine Manager >> [Open] >> View >> Details >> Video QXL >> Model: VGA >> [Apply]
 
 ### 2.1. Configure VM
 
@@ -403,22 +404,6 @@ sudo chmod 777 /var/lib/libvirt/images/win10.img
 - Virtual Machine Manager >> [Open] >> View >> Details >> Channel (spice) >> [Remove]
 
 - Virtual Machine Manager >> [Open] >> View >> Details >> Controller VirtIO Serial 0 >> [Remove]
-
-- Remove PS/2 input (do this in one go) and [Apply]:
-```shell
-    <ps2 state="on"/>  -->>  <ps2 state="off"/>
-  </features>
-
-    <input type="mouse" bus="ps2"/>  **delete**
-    <input type="keyboard" bus="ps2"/>  **delete**
-    <graphics type="spice" autoport="yes">
-    ...
-  </devices>
-```
-
-- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> Input >> Type: USB Mouse >> [Finish]
-
-- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> Input >> Type: USB Keyboard >> [Finish]
 
 ### 2.2. Remove excess PCI
 
@@ -633,6 +618,7 @@ cgroup_device_acl = [
         "/dev/input/event7",
         "/dev/input/event8",
         "/dev/input/event9",
+        "/dev/kvmfr0",
         "/dev/userfaultfd"
 ]
 ```
@@ -760,7 +746,7 @@ sudo -E ./nika
 
 ### 7. Spoof QEMU (mandatory)
 
-- This script is based on: [Scrut1ny/Hypervisor-Phantom](https://github.com/Scrut1ny/Hypervisor-Phantom).
+- Based on: [Scrut1ny/Hypervisor-Phantom](https://github.com/Scrut1ny/Hypervisor-Phantom).
 
 
   <details>
@@ -848,7 +834,6 @@ pcibridge_8086="a0ef"   # Tiger Lake-LP Shared SRAM
 - Pin `vcpu` to `cpuset`, example for 4 cores 8 threads (dies=1) host CPU:
 ```shell
   <vcpu placement="static">8</vcpu>
-  <iothreads>1</iothreads>
   <cputune>
     <vcpupin vcpu="0" cpuset="0"/>
     <vcpupin vcpu="1" cpuset="1"/>
@@ -858,8 +843,6 @@ pcibridge_8086="a0ef"   # Tiger Lake-LP Shared SRAM
     <vcpupin vcpu="5" cpuset="5"/>
     <vcpupin vcpu="6" cpuset="6"/>
     <vcpupin vcpu="7" cpuset="7"/>
-    <emulatorpin cpuset="0"/>
-    <iothreadpin iothread="1" cpuset="1"/>
   </cputune>
   <cpu mode="host-passthrough" check="none" migratable="off">
     <topology sockets="1" clusters="1" dies="1" cores="4" threads="2"/>
@@ -870,15 +853,12 @@ pcibridge_8086="a0ef"   # Tiger Lake-LP Shared SRAM
 - Pin `vcpu` to `cpuset`, example for 12 cores 24 threads (dies=2) host CPU:
 ```shell
   <vcpu placement="static">24</vcpu>
-  <iothreads>1</iothreads>
   <cputune>
     <vcpupin vcpu="0" cpuset="0"/>
     <vcpupin vcpu="1" cpuset="1"/>
     ...
     <vcpupin vcpu="22" cpuset="22"/>
     <vcpupin vcpu="23" cpuset="23"/>
-    <emulatorpin cpuset="0"/>
-    <iothreadpin iothread="1" cpuset="1"/>
   </cputune>
   <cpu mode="host-passthrough" check="none" migratable="off">
     <topology sockets="1" clusters="1" dies="2" cores="6" threads="2"/>
@@ -888,7 +868,7 @@ pcibridge_8086="a0ef"   # Tiger Lake-LP Shared SRAM
 
 ### 7.1. Spoof OVMF (mandatory)
 
-- This script is based on: [Scrut1ny/Hypervisor-Phantom](https://github.com/Scrut1ny/Hypervisor-Phantom).
+- Based on: [Scrut1ny/Hypervisor-Phantom](https://github.com/Scrut1ny/Hypervisor-Phantom).
 
 
   <details>
@@ -929,14 +909,67 @@ pcibridge_8086="a0ef"   # Tiger Lake-LP Shared SRAM
 
 ### 7.2. Replace network (mandatory)
 
-- Virtual Machine Manager >> [Open] >> View >> Details >> NIC :xx:xx:xx >> [Remove]
+- Virtual Machine Manager >> [Open] >> View >> Details >> USB Redirector 2 >> [Remove]
 
-- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> USB/PCI Host Device:
-  - USB/PCI Network Interface Card >> **[Finish]**
+- Virtual Machine Manager >> [Open] >> View >> Details >> USB Redirector 1 >> [Remove]
+
+- Virtual Machine Manager >> [Open] >> View >> Details >> Controller USB 0 >> Model: none >> **(type it in)** >> [Apply]
+
+- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> PCI Host Device:
+  - USB 3.x xHCI Host Controller >> **[Finish]**
+
+- Virtual Machine Manager >> [Open] >> View >> Details >> NIC :xx:xx:xx >> [Remove]
 
 - Start VM.
 
 - Device Manager >> View >> Show hidden devices >> Intel(R) 82574L Gigabit Network Connection >> Uninstall device
+
+### 7.2.1a. USB
+
+- Plug an USB Network Interface Card into USB 3.x xHCI Host Controller port.
+
+### 7.2.1b. rtl8125
+
+- Credit to: [HazedHV/AutoVirt](https://github.com/HazedHV/AutoVirt).
+
+- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> Network >> MAC address: YOUR_MAC_HERE >> Device model: rtl8125 >> **(type it in)** >> [Finish]
+
+### 7.2.1c. virtio
+
+- Download `virtio-win.iso` from: [`fedorapeople.org`](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso).
+
+
+- Replace `</qemu:commandline>` and [Apply]:
+  <details>
+    <summary>Spoiler</summary>
+
+  ```shell
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/home/fedora/Downloads/virtio-win.iso,format=raw,read-only=on,if=none,id=drive-sata1-1"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-cd,bus=device-sata1.1,drive=drive-sata1-1,id=sata1-1"/>
+  </qemu:commandline>
+  ```
+  </details>
+
+- Delete `vars.sh`, run `qemupatch.sh` and `ovmfpatch.sh`.
+
+- Download `virtio.cmd` to `network` folder in Desktop (on Windows VM).
+
+- Run `virtio.cmd`, it will copy necessary files from CDROM device.
+
+- Stop VM.
+
+- Virtual Machine Manager >> [Open] >> View >> Details >> [Add Hardware] >> Network >> MAC address: YOUR_MAC_HERE >> Device model: virtio >> [Finish]
+
+- Start VM.
+
+- Install virtio ethernet from `network` folder (use Device Manager).
+
+- Open an `Administrator Command Prompt`, disable `testsigning`, then restart:
+```shell
+bcdedit /set testsigning off
+```
 
 ### 7.3. Build custom Linux kernel (mandatory)
 
@@ -957,7 +990,7 @@ cd "linux-tkg/RPMs"
 sudo dnf install kernel-6.19.14_tkg_eevdf+-1.x86_64.rpm
 ```
 
-- Edit `/etc/default/grub`, add **cpuset.sched_load_balance=0 processor.max_cstate=1 mitigations=auto**:
+- Edit `/etc/default/grub`, add **mitigations=auto**:
 ```shell
 GRUB_CMDLINE_LINUX="mitigations=auto ..."
 ```
@@ -977,7 +1010,7 @@ GRUB_CMDLINE_LINUX="mitigations=auto ..."
 cd "linux-tkg/RPMs"
 sudo dnf install kernel-devel-6.19.14_tkg_eevdf+-1.x86_64.rpm
 sudo dnf download dkms
-sudo rpm -i --nodeps dkms-3.4.1-1.fc44.noarch.rpm
+sudo rpm -i --nodeps dkms-3.4.3-2.fc44.noarch.rpm
 sudo wget https://github.com/memflow/memflow-kvm/releases/download/bin-kernel-6.19/memflow-source-only.dkms.tar.gz
 sudo dkms install --archive=memflow-source-only.dkms.tar.gz
 ```
