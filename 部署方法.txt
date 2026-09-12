@@ -1,0 +1,756 @@
+Phase 0：硬件验证（不用联网，先跑）
+bash
+echo "=== VT-x ==="; grep -o 'vmx' /proc/cpuinfo | head -1
+echo "=== KVM ==="; ls /dev/kvm
+echo "=== VT-d ==="; dmesg 2>/dev/null | grep -i vt-d | tail -1
+echo "=== iGPU ==="; lspci -k -s 00:02.0 | grep -E "VGA|Driver"
+echo "=== dGPU ==="; lspci -nn | grep 10de
+echo "=== 内核版本 ==="; uname -r
+判定：vmx 有输出 / /dev/kvm 存在 / VT-d 有 Intel 字样 / iGPU 显示 UHD 630 / dGPU 显示 GTX 1650 + PCI ID / 内核是 6.19.x → 全过才继续。
+Phase 1：锁内核 + 关 SELinux + 装依赖（唯一一次联网装包）
+1.1 第一件事：锁死内核（以后任何 dnf 操作都碰不到内核）
+bash
+sudo sh -c 'echo "exclude=kernel*" >> /etc/dnf/dnf.conf'
+# 验证
+cat /etc/dnf/dnf.conf | grep exclude
+# 必须看到 exclude=kernel*
+ 
+1.2 关 SELinux（README 强制）
+bash
+sudo sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
+cat /etc/selinux/config | grep SELINUX=
+# 必须显示 SELINUX=disabled
+ 
+1.3 联网装依赖（全是 install，不是 update）
+bash
+# 连 WiFi 后执行：
+# RPM Fusion 源
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm -y
+sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm -y
+# Intel 核显硬件解码（UHD 630）
+sudo dnf install intel-media-driver -y
+# 虚拟化组件
+sudo dnf install @virtualization -y
+# 编译工具（后面编译 QEMU/内核用）
+#此命令不可用sudo dnf groupinstall "Development Tools" -y
+sudo dnf group install development-tools -y
+sudo dnf install git -y
+1.4 配置 libvirt（README 第 1.2 节）
+bash
+# qemu.conf（音频需要）
+sudo sed -i 's/#user = "libvirt-qemu"/user = "1000"/' /etc/libvirt/qemu.conf
+# libvirtd.conf
+sudo sed -i 's/#unix_sock_group = "libvirt"/unix_sock_group = "libvirt"/' /etc/libvirt/libvirtd.conf
+sudo sed -i 's/#unix_sock_rw_perms = "0770"/unix_sock_rw_perms = "0770"/' /etc/libvirt/libvirtd.conf
+# 用户组 + 服务
+sudo usermod -aG libvirt $USER
+sudo systemctl enable libvirtd.service
+#启动
+sudo systemctl start libvirtd.service
+sudo systemctl status libvirtd --no-pager | head -3
+# 要看到 active (running)
+groups
+# 确认列表里有 libvirt（没有的话，你重启后才会生效 usermod）
+2. libvirtd 不自启的根因：模块化守护进程在抢班夺权
+Fedora 41+ 默认启用了模块化 daemon（virtqemud、virtnetworkd 等一堆），它们和老的 libvirtd 互相冲突——开机时两边抢启动，模块化赢了就把 libvirtd 干掉，所以每次重启都“已启用但没运行”。解法：把模块化全家禁掉，只留 libvirtd：
+bash
+# 一次性禁用所有模块化 daemon 的 service 和 socket
+sudo systemctl disable --now \
+  virtqemud.service virtnetworkd.service virtstoraged.service \
+  virtnodedevd.service virtnwfilterd.service virtsecretd.service virtinterfaced.service \
+  virtqemud.socket virtqemud-ro.socket virtqemud-admin.socket \
+  virtnetworkd.socket virtnetworkd-ro.socket virtnetworkd-admin.socket \
+  virtstoraged.socket virtstoraged-ro.socket virtstoraged-admin.socket \
+  virtnodedevd.socket virtnodedevd-ro.socket virtnodedevd-admin.socket \
+  virtnwfilterd.socket virtnwfilterd-ro.socket virtnwfilterd-admin.socket \
+  virtsecretd.socket virtsecretd-ro.socket virtsecretd-admin.socket \
+  virtinterfaced.socket virtinterfaced-ro.socket virtinterfaced-admin.socket 2>/dev/null
+# 让 libvirtd 独占并立即启动
+sudo systemctl enable --now libvirtd.service
+# 验证
+sudo systemctl is-active libvirtd    # active
+systemctl is-enabled libvirtd        # enabled
+ 
+然后重启实测一次——重启后不开终端手动 start，直接跑：
+bash
+sudo systemctl is-active libvirtd
+ 
+1.5 KDE 细节设置（README 第 1a 节要求）
+plaintext
+Dolphin 文件管理器 → F10 → 配置 Dolphin... → 预览 → 
+取消勾选 [ ] 文件夹 → 应用
+ 
+1.6 重启 + 验证
+bash
+sudo reboot
+回来后跑：
+bash
+echo "=== SELinux ==="; getenforce
+# 必须 Disabled（如果还 Enforcing → 再重启一次）
+echo "=== 内核没变 ==="; uname -r
+# 还是 6.19.x，和装完系统时一模一样
+echo "=== libvirt ==="; sudo systemctl status libvirtd --no-pager | head -3
+# active (running)
+Phase 2：KVM 模块 + VFIO 绑定 1650（重启回来后执行）
+2.1 内核模块配置
+bash
+sudo tee /etc/modprobe.d/kvm.conf << 'EOF'
+options kvm_intel nested=1
+options kvm ignore_msrs=0
+softdep nouveau pre: vfio-pci
+softdep nvidia pre: vfio-pci
+EOF
+sudo dracut -f
+2.2 找出 1650 的全部 PCI ID
+bash
+lspci -nn | grep 10de
+改 GRUB
+sudo cp /etc/default/grub /etc/default/grub.bak
+sudo nano /etc/default/grub
+ 
+把  GRUB_CMDLINE_LINUX="..."  那一整行替换成：
+GRUB_CMDLINE_LINUX="nofb vfio-pci.ids=10de:1f91,10de:10fa split_lock_detect=off intel_iommu=on iommu=pt mitigations=auto"
+ 
+保存：Ctrl+O → 回车 → Ctrl+X
+2.3 应用并重启
+bash
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+sudo reboot
+ 
+2.4 验证 VFIO 绑定（关键！）
+bash
+lspci -k -s 01:00
+ 
+判定：VGA 和 Audio 两行下面都要显示  Kernel driver in use: vfio-pci 。
+Phase 3 开始：伪装编译
+3.1 先把项目文件弄到 Fedora 机器上
+如果你是从 GitHub 克隆的这个项目：
+bash
+cd ~
+git clone <项目地址> nika
+cd nika
+ 
+如果你是用 U 盘拷的，把整个项目文件夹拷到  ~/nika 。
+确认这三个关键文件在：
+bash
+ls qemupatch.sh kernelpatch619.sh ovmfpatch.sh intel619.mypatch
+ 
+3.2 收集你主板的 PCI ID（qemupatch.sh 要用）
+直接把下面命令的完整输出贴给我：
+bash
+lspci -nn
+mdm@fedora:~/下载/Nika-Read-Only-main$ lspci -nn
+00:00.0 Host bridge [0600]: Intel Corporation 8th/9th Gen Core Processor Host Bridge / DRAM Registers [8086:3ec4] (rev 07)
+00:01.0 PCI bridge [0604]: Intel Corporation 6th-10th Gen Core Processor PCIe Controller (x16) [8086:1901] (rev 07)
+00:02.0 VGA compatible controller [0300]: Intel Corporation CoffeeLake-H GT2 [UHD Graphics 630] [8086:3e9b]
+00:08.0 System peripheral [0880]: Intel Corporation Xeon E3-1200 v5/v6 / E3-1500 v5 / 6th/7th/8th Gen Core Processor Gaussian Mixture Model [8086:1911]
+00:12.0 Signal processing controller [1180]: Intel Corporation Cannon Lake PCH Thermal Controller [8086:a379] (rev 10)
+00:14.0 USB controller [0c03]: Intel Corporation Cannon Lake PCH USB 3.1 xHCI Host Controller [8086:a36d] (rev 10)
+00:14.2 RAM memory [0500]: Intel Corporation Cannon Lake PCH Shared SRAM [8086:a36f] (rev 10)
+00:14.3 Network controller [0280]: Intel Corporation Cannon Lake PCH CNVi WiFi [8086:a370] (rev 10)
+00:15.0 Serial bus controller [0c80]: Intel Corporation Cannon Lake PCH Serial IO I2C Controller #0 [8086:a368] (rev 10)
+00:15.1 Serial bus controller [0c80]: Intel Corporation Cannon Lake PCH Serial IO I2C Controller #1 [8086:a369] (rev 10)
+00:16.0 Communication controller [0780]: Intel Corporation Cannon Lake PCH HECI Controller [8086:a360] (rev 10)
+00:17.0 SATA controller [0106]: Intel Corporation Cannon Lake Mobile PCH SATA AHCI Controller [8086:a353] (rev 10)
+00:1d.0 PCI bridge [0604]: Intel Corporation Cannon Lake PCH PCI Express Root Port #9 [8086:a330] (rev f0)
+00:1d.5 PCI bridge [0604]: Intel Corporation Cannon Lake PCH PCI Express Root Port #14 [8086:a335] (rev f0)
+00:1e.0 Communication controller [0780]: Intel Corporation Cannon Lake PCH Serial IO UART Host Controller [8086:a328] (rev 10)
+00:1f.0 ISA bridge [0601]: Intel Corporation HM370 Chipset LPC/eSPI Controller [8086:a30d] (rev 10)
+00:1f.3 Audio device [0403]: Intel Corporation Cannon Lake PCH cAVS [8086:a348] (rev 10)
+00:1f.4 SMBus [0c05]: Intel Corporation Cannon Lake PCH SMBus Controller [8086:a323] (rev 10)
+00:1f.5 Serial bus controller [0c80]: Intel Corporation Cannon Lake PCH SPI Controller [8086:a324] (rev 10)
+01:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU117M [GeForce GTX 1650 Mobile / Max-Q] [10de:1f91] (rev a1)
+01:00.1 Audio device [0403]: NVIDIA Corporation Device [10de:10fa] (rev a1)
+06:00.0 Non-Volatile memory controller [0108]: Sandisk Corp WD Blue SN500 / PC SN520 x2 M.2 2280 NVMe SSD [15b7:5003] (rev 01)
+07:00.0 Ethernet controller [0200]: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller [10ec:8168] (rev 25)
+我拿到输出后，帮你把 qemupatch.sh 里的 8 个变量（lpc/smbus/hdaudio/sata/rootport/xhci/hostbridge/pcibridge）逐一填成你这台宏碁的真实值——这步填错反作弊伪装就露馅，必须用真实数据。
+全部锁定了。你的 lspci 和脚本变量一一对应如下——这份值是按你真实硬件逐设备填的（README 作者的 TGL 配置也是这个模式）：
+✏️ 修改 qemupatch.sh（Intel 段，第 15-23 行）
+bash
+cd ~/下载/Nika-Read-Only-main
+nano qemupatch.sh
+ 
+把 Intel 那一段（ lpc_8086  到  pcibridge_8086  共 9 行）替换成：
+shell
+lpc_8086="a30d"         # HM370 Chipset LPC/eSPI Controller
+smbus_8086="a323"       # Cannon Lake PCH SMBus Controller
+hdaudio_8086="a348"     # Cannon Lake PCH cAVS
+hdaname_8086="Cannon Lake PCH cAVS"
+sata_8086="a353"        # Cannon Lake Mobile PCH SATA AHCI Controller
+rootport_8086="1901"    # 6th-10th Gen Core Processor PCIe Controller (x16)
+xhci_8086="a36d"        # Cannon Lake PCH USB 3.1 xHCI Host Controller
+hostbridge_8086="3ec4"  # 8th/9th Gen Core Processor Host Bridge / DRAM Registers
+pcibridge_8086="a36f"   # Cannon Lake PCH Shared SRAM
+上面  *_1022  开头的 AMD 段不用动——脚本会自动检测你是 Intel CPU，只用  *_8086  这组。
+保存：Ctrl+O → 回车 → Ctrl+X
+🔨 编译伪装 QEMU
+bash
+# 1. 装编译依赖（README 第 7 节 Fedora 44 命令）
+sudo dnf install acpica-tools bzip2-devel gcc git glib2-devel libfdt-devel libusb1-devel libuuid-devel ninja-build pipewire-devel pixman-devel SDL2_image-devel spice-server-devel usbredir-devel zlib-ng-compat-devel -y
+# 2. 运行补丁脚本（会自动 sudo 提权，克隆 QEMU 11.0 → 打补丁 → 编译安装）
+chmod +x qemupatch.sh
+./qemupatch.sh
+注意事项：
+编译要 20-40 分钟（9750H 6 核），中途别关终端
+运行后目录里会生成一个  vars.sh （随机化的设备 ID），这是正常的，别删
+成功标志：
+bash
+ls /usr/local/bin/qemu-system-x86_64
+# 文件存在 = 成功
+跑完把最后几十行输出（或者成功/报错信息）贴给我。成功后下一步就是你那个  kernelpatch619.sh （编译 6.19 补丁内核）。
+修复：把排除规则改精确
+在 Fedora 机器上执行：
+bash
+# 把 exclude=kernel* 替换成精确列表（只锁启动内核，放开 kernel-headers/kernel-devel）
+sudo sed -i 's/^exclude=kernel\*$/exclude=kernel,kernel-core,kernel-modules,kernel-modules-extra,kernel-debug-core,kernel-debug-modules/' /etc/dnf/dnf.conf
+# 验证（应显示新的精确列表，没有通配符了）
+grep exclude /etc/dnf/dnf.conf
+ 
+预期输出：
+plaintext
+exclude=kernel,kernel-core,kernel-modules,kernel-modules-extra,kernel-debug-core,kernel-debug-modules
+ 
+说明：
+​
+锁住的： kernel / kernel-core / kernel-modules / kernel-debug*  —— 这些是启动内核本体，更新了才会顶掉 6.19.10
+​
+放开的： kernel-headers / kernel-devel  —— 只是给编译器用的头文件，装了不会动你的启动内核，QEMU 编译必须要它
+​
+如果 sed 没生效（grep 还是老样子），就  sudo nano /etc/dnf/dnf.conf  手动把那行改掉
+然后重跑依赖安装
+bash
+sudo dnf install acpica-tools bzip2-devel gcc git glib2-devel libfdt-devel libusb1-devel libuuid-devel ninja-build pipewire-devel pixman-devel SDL2_image-devel spice-server-devel usbredir-devel zlib-ng-compat-devel -y
+ 
+这次 glibc-devel 和 kernel-headers 能正常装上，两个“问题 1/问题 2”都会消失。（开头那句“git 已安装”只是提示，无害。）
+装完后顺手验证一下启动内核没被动：
+bash
+uname -r
+# 必须还是 6.19.10-300.fc44.x86_64
+ 
+确认无误后继续跑  ./qemupatch.sh （20-40 分钟，别关终端）。跑完贴结果。
+坏消息：QEMU 没编译成功——最后那三行路径只是脚本“盲目打印”的，真正的错误在前面： cp: 对 .../build/qemu-system-x86_64 调用 stat 失败 （二进制根本没生成）。好消息：GitHub 克隆已成功存进  qemubackup ，补丁都已打上，只差 PyPI 这一步。换成清华镜像就能过。
+修复（3 条命令）
+bash
+# 1. 配置 pip 走清华镜像（写入全局配置，root 的 pip 也会用）
+sudo tee /etc/pip.conf << 'EOF'
+[global]
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+trusted-host = pypi.tuna.tsinghua.edu.cn
+EOF
+# 2. 删掉构建失败的残留（pyvenv 半成品必须清掉，否则重跑会复用坏环境）
+cd ~/下载/Nika-Read-Only-main
+sudo rm -rf qemu/build
+# 3. 重跑（qemubackup 已存在会跳过克隆，直接重新拷贝源码→打补丁→编译）
+./qemupatch.sh
+ 
+为什么这样能救回来（看了脚本源码确认）：
+脚本每次运行都会  cp -fr qemubackup/. qemu （第 509 行）——干净源码重新覆盖，之前打过的补丁会被重放，完全幂等，重跑无副作用
+​
+ vars.sh  已生成并保留，重跑用的是同一套随机 ID，不会变化
+​
+失败点只在 mkvenv 的 pip 下载（被墙）， /etc/pip.conf  的镜像让这一步从清华源拉，秒过
+这次跑完的正确验证方式（别信脚本 echo 的路径）：
+bash
+ls -lh /usr/local/bin/qemu-system-x86_64
+# 必须显示一个几十 MB 的真实文件，且日期是刚才
+编译 20-40 分钟，中途前 2 分钟盯一下 mkvenv 是否顺利装完 meson/qemu.qmp（过了这个坎基本就成了）。跑完贴结果。
+内核脚本逻辑确认了——自动检测到你的 Intel CPU 就会用  intel619.mypatch ，不用手动选。直接跑：
+bash
+cd ~/下载/Nika-Read-Only-main
+./kernelpatch619.sh
+这是在问内核编译时针对哪种 CPU 架构优化——你的 9750H 选  native （自动针对当前 CPU 优化，最合适）。
+直接输入：
+native
+回车。
+趁编译的 40-90 分钟，把这两样提前备好，别到时候卡住：
+Windows 10 20H1 ISO（README 第 29 行指定： win-10-2004-english-x-64  + KB4598291 补丁）——从 archive.org 下载（地址在 README 里有链接），国内可能慢，用 Motrix 多线程拉
+三个 RPM 全装（devel/headers 是给后面 nika 和 memflow 用的），直接  rpm -ivh  绕过 dnf 的 exclude 规则：
+bash
+cd ~/下载/Nika-Read-Only-main/linux-tkg/RPMS
+# 三个全装
+sudo rpm -ivh kernel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+            kernel-devel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+            kernel-headers-6.19.14_tkg_eevdf-1.x86_64.rpm
+# 生成引导项
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+# 重启进新内核
+sudo reboot
+ 
+重启后验证（关键判定）：
+bash
+uname -r
+ 
+✅ 输出  6.19.14-tkg-eevdf-1  → 伪装内核已生效，Phase 3 内核完成
+​
+❌ 还是  6.19.10-300.fc44  → 开机时 GRUB 菜单没默认选 tkg 内核，重启在 GRUB 界面（开机按 Esc 或狂按方向键调出菜单）里选 6.19.14-tkg-eevdf 那项进
+进新内核后顺手验证 VFIO 还活着（改了内核必须复查，模块配置可能要重载）：
+bash
+lspci -k -s 01:00 | grep "Kernel driver"
+# 两个设备仍然都要显示 vfio-pci
+ 
+如果新内核下 1650 变回 nouveau 了，把  lspci -k -s 01:00  完整输出贴给我（多半是 dracut 要重新生成 initramfs，一条命令的事）。
+依赖冲突：之前装 QEMU 依赖时装了仓库里的  kernel-headers-7.1.3 （开发头文件，会反过来限制内核版本）。把官方 headers 降级成 tkg 的 6.19.14 版本就解决了：
+bash
+# 用 --replacefiles + 降级 headers：直接强装 tkg 的三个包
+cd ~/下载/Nika-Read-Only-main/linux-tkg/RPMS
+sudo rpm -ivh --replacefiles kernel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+    kernel-devel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+    kernel-headers-6.19.14_tkg_eevdf-1.x86_64.rpm
+ 
+如果还报同样的错（因为新版本 headers 已在库），就先移除官方 headers 再装：
+bash
+# 方案 B（更干净）：
+sudo dnf remove kernel-headers-7.1.3-200.fc44 -y
+sudo rpm -ivh kernel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+    kernel-devel-6.19.14_tkg_eevdf-1.x86_64.rpm \
+    kernel-headers-6.19.14_tkg_eevdf-1.x86_64.rpm
+ 
+说明： kernel-headers  是编译用的头文件包，不是启动内核——把它从 7.1.3 换成 6.19.14 不会影响系统启动，只会让 gcc 编译时引用 6.19 的头文件（这正是我们要的，和 tkg 内核配套）。启动内核一直没被动过，放心。
+装完后照旧：
+bash
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+sudo reboot
+ 
+重启后跑  uname -r ，预期  6.19.14-tkg-eevdf-1 。贴给我确认。
+验证 VFIO（新内核必须复查）
+bash
+lspci -k -s 01:00 | grep "Kernel driver"
+两个设备仍然显示  vfio-pci  → 继续。如果变回 nouveau → 把完整输出贴我。
+最后一块编译拼图：伪装 OVMF。
+编译 OVMF
+bash
+# 依赖
+sudo dnf install g++ nasm python3-virt-firmware -y
+cd ~/下载/Nika-Read-Only-main
+./ovmfpatch.sh
+dmidecode 打错了（我的锅，少个 m）
+bash
+2. 收集 SMBIOS 伪造数据（建 VM 时要用，README 第 2.2 节要求填真实值）：
+sudo dmidecode -t 1 -t 2 -t 3 > ~/smbios.txt
+cat ~/smbios.txt
+正确解法：用 git 的全局 URL 重写规则，让所有 github.com 请求自动走代理，一条配置解决主仓库+全部子模块。
+1. 设置全局 URL 重写（核心）
+bash
+git config --global url."https://gh-proxy.com/https://github.com/".insteadOf "https://github.com/"
+ 
+这个配置让 git 以后所有访问  https://github.com/...  的操作（包括子模块、包括其他仓库）都自动改写成走  gh-proxy.com ——不用改任何脚本和 .gitmodules。
+你之前在 ovmfpatch.sh 里手改的前缀可以不用管了（反正我们手动克隆，脚本那行不再执行；即使执行也不会双重拼接前缀，重写规则只匹配以 github.com 开头的 URL）。
+2. 清掉残缺目录，重新克隆
+bash
+cd ~/下载/Nika-Read-Only-main
+sudo rm -rf ovmfbackup ovmf
+# 浅克隆主仓库 + 子模块全部浅克隆 + 8 线程并行拉子模块
+git clone --recursive --single-branch --branch edk2-stable202602 \
+  --depth 1 --shallow-submodules -j 8 \
+  https://github.com/tianocore/edk2.git ovmfbackup
+ 
+ --shallow-submodules ：每个子模块也只拉 1 层快照（openssl 全历史好几 GB，浅克隆只要 ~100MB）
+​
+ -j 8 ：8 个子模块并行下载
+​
+因为第 1 步的重写规则，主仓库和所有子模块都会自动走 gh-proxy
+3. 验证子模块全部就位（关键！别跳）
+bash
+cd ovmfbackup
+git submodule status
+ 
+判定：
+✅ 每行开头是 commit 哈希（如  8a2c3d4... ）→ 正常
+​
+❌ 某行开头是  -  → 该子模块没初始化，缺了编译必炸
+如果开头全是哈希、没有  - ，就成功了。
+4. 跑脚本
+bash
+cd ~/下载/Nika-Read-Only-main
+./ovmfpatch.sh
+ 
+ Continue? [y/N]  → 输  y 
+​
+之后纯本地编译 10-20 分钟
+​
+ Set EFI variables? [Y/n]  → 直接回车
+5. 验证产物
+bash
+ls -lh /usr/share/edk2/ovmf/ | grep patched
+# OVMF_CODE_4M.patched.qcow2 和 OVMF_VARS_4M.patched.qcow2，真实大小
+ 
+ 
+事后提示：这个全局代理规则以后对所有 git 操作生效。如果哪天要正常直连 GitHub（比如推自己的代码），删掉它即可：
+bash
+git config --global --unset url."https://gh-proxy.com/https://github.com/".insteadOf
+ 
+编译结果贴给我。过了就进最后的 Phase 4——建 Windows VM。
+SMBIOS 数据收到，已经嵌进 README 的模板。趁 OVMF 还在下载，先把这份你的 Acer Nitro AN715-51 专属伪装块给你——这是 Phase 4 建 VM 时要贴进 XML 的，先存好。
+关键决策：序列号我给你改了，型号保留真值
+先说清楚为什么这么填，这直接关系封号：
+plaintext
+SMBIOS 字段分两类：
+型号级信息（保留真实值）：
+  Manufacturer: Acer
+  Product: Nitro AN715-51
+  Baseboard: CFL / Citigo_CFS
+  Version: V1.29
+  → 全世界所有同型号机器都一样，不构成唯一标识，保留 = 最可信
+实例级信息（必须修改）：
+  Serial Number / UUID / MAC
+  → 每台机器唯一，EAC 拿它做 HWID 指纹
+  → 你这台笔记本之前装过 Windows，如果玩过 Apex，
+    EAC 服务器里已经存了你真机的序列号+UUID
+  → VM 里如果原样照抄 = 开机即被关联到旧硬件指纹 = 秒封
+ 
+你的定制 SMBIOS 块（已改序列号/UUID）
+xml
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=1,manufacturer=Acer,product=Nitro AN715-51,version=V1.29,serial=NHQ5FCN0039204EA7C212B00,uuid=7a0b9bb8-ba68-e911-80cf-51b2c3d4e5f6,sku=0000000000000000,family=Nitro 7"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=2,manufacturer=CFL,product=Citigo_CFS,version=V1.29,serial=NBQ591100T7488BC2A93100"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=3,manufacturer=Acer,version=V1.29,serial=NHQ5FCN0039204EA7C212B00"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=4500,current-speed=2600"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=17,manufacturer=待填,part=待填,speed=2666,serial=待填"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Keyboard,connector_type=0x0F,port_type=0x0D"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Mouse,connector_type=0x0F,port_type=0x0E"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=9,slot_designation=J6C1,slot_type=0xAA,slot_data_bus_width=0x0D,current_usage=0x04,slot_length=0x04,slot_id=0x01,slot_characteristics1=0x04,slot_characteristics2=0x03"/>
+ 
+改动说明：
+type=1 序列号： NHQ5FCN0039200DC243400  →  NHQ5FCN0039204EA7C212B00 （保留 Acer 序列号前缀格式，后面的随机部分换掉）
+​
+UUID：首尾几段换成了随机值（结构不变，仍是标准 UUID 格式）
+​
+type=2 板子序列号：同样保留前缀  NBQ591100 ，后段换掉
+​
+type=4 CPU：i7-97500H 实际参数（基频 2600 / 睿频 4500， U3E1  是这个 CPU 的 BGA1440 插座代号）
+​
+type=8/9：键鼠接口和插槽信息，通用值直接照抄 README 即可
+还差 3 个数据，现在就能采
+bash
+# 1. 内存条信息（填 type=17 的"待填"）
+sudo dmidecode -t 17
+# 2. CPU 信息（核对 type=4 我填的参数）
+sudo dmidecode -t 4
+# 3. 总内存（决定 VM 分多少）
+free -h
+数据全齐！内存 16GB（Kingston + Hynix 双通道 2667）、CPU 6C/12T、WiFi 上网、ISO 就位。最终 SMBIOS type=17 定稿（注意你第二根内存是海力士，厂商名"8967"是 OEM 杂牌标识，我用 Part Number 映射回标准名）：
+xml
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=17,manufacturer=Kingston,part=ACR26D4S9S8ME-8,speed=2667,serial=E4370112"/>
+      <qemu:arg value="-smbios"/>
+      <qemu:arg value="type=17,manufacturer=SK Hynix,part=HMA81GS6CJR8N-VK,speed=2667,serial=2C702063"/>
+ 
+（序列号末位 +1，和真机差一位，同前策略：型号真、序列假）
+🚀 Phase 4 开始：创建 Windows 10 VM
+4.1 virt-manager 两个前置开关
+plaintext
+打开 virt-manager（开始菜单搜 Virtual Machine Manager）
+① Edit → Preferences → General → 勾选 [x] Enable XML editing → Close
+② Edit → Preferences → New VM → Storage format: Raw → Close
+4.2 修正版：
+plaintext
+Step 1: 选 Manual install          ← 唯一改动，选最后一项，不要选 Local install media
+Step 2: （没有这一步，不选 ISO——ISO 后面在 XML 里挂）
+Step 3: 内存 4096 / CPU 10          ← 随便填，XML 会覆盖
+Step 4: 不勾 Enable storage
+Step 5: 名字 win10 + Customize before install → Finish
+ 
+4.3 修正版：
+plaintext
+① Overview → Chipset: Q35
+   Firmware: 下拉里有什么 OVMF 就选什么（占位，XML 手术时会整块替换成 patched 版）
+   → Apply
+② 磁盘二选一：
+   方案 A（命令行，推荐）：
+     sudo qemu-img create -f raw /var/lib/libvirt/images/win10.img 240G
+     sudo chmod 777 /var/lib/libvirt/images/win10.img
+   方案 B（GUI，照 README 原样）：
+     Add Hardware → Storage → Select or create custom storage → [Manage...]
+     → [+] → win10.img / 240 GiB → [Finish]
+     → [Cancel] → [Cancel]        ← 关键！创建完文件就退出，不选卷、不 Finish
+③ （删除这一步——没有 SATA Disk 1 这个设备）
+→ Begin Installation
+→ 掉进 UEFI Shell / 无盘可启动的界面 → Virtual Machine → Shut Down → Force Off
+ 
+走到这里 VM 骨架就建好了：域已持久化到  /etc/libvirt/qemu/win10.xml ，XML 里没有任何存储设备，emulator 也还是默认路径——所以无论怎么折腾都不会再碰  ide.0 。
+一、先排除那次卡死的复发风险（2 分钟）
+bash
+grep '<domain type' /etc/libvirt/qemu/win10.xml
+lsmod | grep kvm
+ls -l /dev/kvm
+ 
+ type='kvm'  +  /dev/kvm  存在 → 健康路径，正常往下走
+​
+ type='qemu' （降级纯模拟）→ 这就是卡死原因。修复：
+bash
+sudo depmod $(uname -r)
+sudo modprobe kvm_amd        # Intel CPU 用 kvm_intel
+ls -l /dev/kvm               # 确认出现
+sudo virsh undefine win10 --nvram
+ 
+然后重走 4.2 建骨架（这次直接落成  type='kvm' ）。
+二、继续 Phase 4 主线
+如果上面健康，直接做 Step 2：
+bash
+sudo qemu-img create -f raw /var/lib/libvirt/images/win10.img 240G
+sudo chmod 777 /var/lib/libvirt/images/win10.img
+sudo chmod 666 /usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2
+ls -l /usr/local/bin/qemu-system-x86_64 /usr/local/bin/ssdt1.aml /usr/local/bin/ssdt2.aml
+ls -l /usr/share/edk2/ovmf/OVMF_CODE_4M.patched.qcow2
+ 
+三个  ls  都有输出 → 直接上 Step 3 的 XML 手术
+修正后的完整刀法
+刀 0：终端准备
+bash
+sudo cp ~/Downloads/你的ISO文件名.iso /var/lib/libvirt/images/win10.iso   # 换成实际文件名
+sudo chmod 644 /var/lib/libvirt/images/win10.iso
+sudo dmidecode -t 4 | grep -i speed        # 记下 Max/Current Speed 真值
+ 
+（还没下 ISO 的话，按 README 用 Win10 20H1 (19041)，装完打 KB4598291。）
+刀 1： <domain type="kvm">  整行替换为下面整块（含 HD、CD、SMBIOS、ACPI，完整闭合；CD 用 bootindex=1 先启动，硬盘 bootindex=2；speed 两处换成你的真值）
+xml
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+  <qemu:commandline>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ahci,id=device-sata1,addr=07.0"/>
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/var/lib/libvirt/images/win10.img,format=raw,cache=none,discard=ignore,if=none,id=drive-sata1-0"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,bootindex=2,serial=WXA21ACX"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ahci,id=device-sata2,addr=08.0"/>
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/var/lib/libvirt/images/win10.iso,format=raw,if=none,id=drive-sata2-0,readonly=on"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-cd,bus=device-sata2.0,drive=drive-sata2-0,id=sata2-0,bootindex=1"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=1,manufacturer=Acer,product=Nitro AN715-51,version=V1.29,serial=NHQ5FCN0039204EA7C212B00,uuid=7a0b9bb8-ba68-e911-80cf-51b2c3d4e5f6,sku=0000000000000000,family=Nitro 7"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=2,manufacturer=CFL,product=Citigo_CFS,version=V1.29,serial=NBQ591100T7488BC2A93100"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=3,manufacturer=Acer,version=V1.29,serial=NHQ5FCN0039204EA7C212B00"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=8300,current-speed=2600"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=17,manufacturer=Kingston,part=ACR26D4S9S8ME-8,speed=2667,serial=E4370112"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=17,manufacturer=SK Hynix,part=HMA81GS6CJR8N-VK,speed=2667,serial=2C702063"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Keyboard,connector_type=0x0F,port_type=0x0D"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Mouse,connector_type=0x0F,port_type=0x0E"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=9,slot_designation=J6C1,slot_type=0xAA,slot_data_bus_width=0x0D,current_usage=0x04,slot_length=0x04,slot_id=0x01,slot_characteristics1=0x04,slot_characteristics2=0x03"/>
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt1.aml"/>
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt2.aml"/>
+  </qemu:commandline>
+  刀 2不用做做了报错： <uuid>  整行替换（与 SMBIOS type=1 一致，消除冲突）
+  刀2改为移除多余的PCI，index5-14。
+xml
+  <uuid>7a0b9bb8-ba68-e911-80cf-51b2c3d4e5f6</uuid>
+  刀 3：metadata。若已有  <metadata>...</metadata> ，在  </metadata>  前插入；没有则把整块（含  <metadata>  标签）插到  <uuid>  行之后：
+xml
+  <metadata>
+    <vmware xmlns="http://www.vmware.com/schema/vmware.config">
+      <config>
+        <entry name="hypervisor.cpuid.v0" value="FALSE"/>
+      </config>
+    </vmware>
+  </metadata>
+ 
+刀 4： <memory ...>  到  <vcpu ...>  整块替换（你的 9750H 是 6C12T，12 vCPU 全给和 SMBIOS 一致；想留 2 线程给宿主机就 6→5、12→10）：
+xml
+  <memory unit="GiB">12</memory>
+  <currentMemory unit="GiB">12</currentMemory>
+  <vcpu placement="static">12</vcpu>
+ 
+刀 5： <features>  到  </clock>  整块替换（Intel 版 + ps2 直接 off）：
+ 必须先删除  <input type="mouse" bus="ps2"/>  和  <input type="keyboard" bus="ps2"/>  两行
+xml
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode="custom">
+      <relaxed state="off"/><vapic state="off"/><spinlocks state="off"/>
+      <vpindex state="off"/><runtime state="off"/><synic state="off"/>
+      <stimer state="off"/><reset state="off"/><vendor_id state="off"/>
+      <frequencies state="off"/><reenlightenment state="off"/><tlbflush state="off"/>
+      <ipi state="off"/><evmcs state="off"/><avic state="off"/>
+    </hyperv>
+    <kvm><hidden state="on"/></kvm>
+    <ioapic driver="kvm"/>
+    <msrs unknown="fault"/>
+    <pmu state="on"/>
+    <smm state="on"/>
+    <vmport state="off"/>
+    <ps2 state="off"/>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="off">
+    <topology sockets="1" dies="1" cores="6" threads="2"/>
+    <cache mode="passthrough"/>
+    <feature policy="disable" name="hypervisor"/>
+    <feature policy="require" name="vmx"/>
+    <feature policy="require" name="x2apic"/>
+    <feature policy="require" name="spec-ctrl"/>
+    <feature policy="require" name="stibp"/>
+    <feature policy="require" name="ssbd"/>
+  </cpu>
+  <clock offset="localtime">
+    <timer name="tsc" present="yes" tickpolicy="discard" mode="native"/>
+    <timer name="hpet" present="yes"/>
+    <timer name="rtc" present="yes"/>
+    <timer name="pit" present="yes"/>
+    <timer name="kvmclock" present="no"/>
+    <timer name="hypervclock" present="no"/>
+  </clock>
+ 
+刀 6： <memballoon model="virtio">...</memballoon>  整段替换
+xml
+    <memballoon model="none"/>
+ 
+刀 7： <emulator>  行替换（先换这个，再动刀 8，顺序别反）
+xml
+    <emulator>/usr/local/bin/qemu-system-x86_64</emulator>
+ 
+刀 8： <os  到  </os>  整块替换（锁机器型号 + patched 固件配 patched QEMU，冻结根因到此消除）
+xml
+  <os>
+    <type arch="x86_64" machine="pc-q35-11.0">hvm</type>
+    <loader readonly="yes" secure="yes" type="pflash" format="qcow2">/usr/share/edk2/ovmf/OVMF_CODE_4M.patched.qcow2</loader>
+    <nvram format="qcow2">/usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2</nvram>
+    <bootmenu enable="yes"/>
+  </os>
+ 
+GUI 收尾（Details 界面）：
+删：Tablet、Serial 1、Channel (spice)、Controller VirtIO Serial 0
+​
+XML 里删  <input type="mouse" bus="ps2"/>  和  <input type="keyboard" bus="ps2"/>  两行 → Apply
+​
+加：Add Hardware → Input → USB Mouse；再来一次 USB Keyboard
+​
+Video QXL → Model 改 VGA → Apply
+必删（5 个）
+列表显示 说明 
+绘图板 就是 Tablet 
+信道（spice） Channel spice 
+控制器VirtIO串口0 Controller VirtIO Serial 0 
+串口1   Serial 1
+USB 重定向器两个
+添加 2 个输入设备
+点左下角添加硬件：
+操作 填法 
+第一次 类型选 USB 鼠标（输入设备分类）→ 完成 
+第二次 添加硬件 → 输入设备 → USB 键盘 → 完成 
+改 1 个显示设备
+左侧找到 视频 QXL（显示协议/Video）：
+型号（Model）下拉 → 从 QXL 改成 VGA → 应用
+控制器SATA0 —— ⚠️ 这个要单独说，见下
+⚠️ 控制器SATA0 的处理
+它没有串口和信道那么干脆。这个  <controller type='sata' index='0'/>  默认不生成  -device  参数（假定机器自带 AHCI），而你的伪装 QEMU 把内置 SATA 拆了——留着它本身不会报错（没有设备挂上去时），但它是“看起来存在”的残留。
+处理方式：进 XML（概况 → 3 个点/XML 标签），找到这一段删掉：
+xml
+    <controller type="sata" index="0"/>
+ 
+再来一次，这次：
+按  1  → 回车
+​
+盯着屏幕，只要出现  Press any key... （哪怕是黑底白字一瞬间的画面）——立刻按一下空格键
+​
+成功的话会进入 Windows 徽标 → 蓝色 Windows Setup 界面
+提示超时大约 3-5 秒，所以选完 1 之后手就悬在空格键上等。
+Phase 4 收官三步
+1. 关机（Windows 里正常关机，不是 Force Off）
+2. 删光驱 8 行：详情 → 概况 → XML，删掉这 8 行 → 应用：
+xml
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ahci,id=device-sata2,addr=08.0"/>
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/var/lib/libvirt/images/win10.iso,format=raw,if=none,id=drive-sata2-0,readonly=on"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-cd,bus=device-sata2.0,drive=drive-sata2-0,id=sata2-0,bootindex=1"/>
+ 
+（从第二个  -device ahci  到  ide-cd  那行，共 8 行；sata1 硬盘、SMBIOS、acpitable 全保留）
+3. 启动验证：应该不弹启动菜单（CD 没了，只剩硬盘一个启动项）直接进 Windows 登录界面 = 收官成功。
+验收清单（Windows 里跑一遍，2 分钟）
+ msinfo32  → BIOS 版本/日期应该是 American Megatrends Inc. + 你补丁里的随机日期；主板制造商 Acer
+​
+设备管理器 → 系统设备：没有任何 virtio / Red Hat 设备；磁盘是 KINGSTON SA400S372406
+​
+ wmic csproduct get UUID  → 应该是  7a0b9bb8-... （你 SMBIOS type=1 那个）
+一个重要保养事项
+你现在是 19041 (2004/20H1) + KB4598291——这正是 README 钦点的稳定组合（nika 的 CR3 偏移就锁这个版本）。去 设置 → 更新和安全 → Windows 更新 → 暂停更新 7 天，并且永远不要接受“功能更新”（升到 20H2/21H1 会改内核结构，nika 直接失效）。安全更新（纯 KB 补丁）可以装。
+驱动安装：手动 INF 法（对安装器报“没有兼容硬件”免疫）
+你的进度现状（比想象中好）
+ nvidia-smi -L  出来了，Phase 5 的硬件层全部打通。记录在案：
+GPU UUID（§7.6 的“旧 UUID”）： GPU-f7d704b4-91c1-1d04-6449-6e52b4cf90ef  —— 存好，跑一次 nika 之后对比它变没变
+​
+当前形态：hostdev 直通 + ROM BAR off + 手动 INF 驱动
+NVIDIA 控制面板 → 管理 3D 设置 → 着色器缓存大小 → 10 GB（README §3.2 要求）
+​
+Steam 串流（§5.3）：VM 里装 Steam 登录 → 宿主机装 Steam（rpmfusion +  sudo dnf install steam ）→ 同账号 → 远程畅玩连  DESKTOP-XXXXXX  → 串流通了以后把虚拟 VGA 删掉（型号改“无”）
+串流的坑防火墙
+防火墙放行 virbr0（先做这个）
+bash
+sudo firewall-cmd --zone=trusted --add-interface=virbr0 --permanent
+sudo firewall-cmd --reload
+sudo firewall-cmd --list-all-zones | grep -A8 "trusted"
+ 
+确认输出里 virbr0 在 trusted 的 interfaces 里。
+主机装steam
+sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install steam
+sudo ln -s /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt
+ 
+命令 作用 
+第 1 条 装 RPM Fusion 软件源（Steam 在 Fedora 的 nonfree 源里） 
+第 2 条 装 Steam 本体 
+第 3 条 建证书软链（Steam 客户端找 Debian 风格的证书路径，没有会连不上商店）
+4.配置evdev直通（在Linux电脑上）
+用以下工具找到你的鼠标和键盘：
+ls -l /dev/input/by-id/
+编辑：/etc/libvirt/qemu.conf
+
+cgroup_device_acl = [
+        "/dev/null", "/dev/full", "/dev/zero",
+        "/dev/random", "/dev/urandom",
+        "/dev/ptmx", "/dev/kvm", "/dev/kqemu",
+        "/dev/rtc", "/dev/hpet",
+        "/dev/input/by-id/usb-COMPANY_USB_Device-if01-event-mouse",
+        "/dev/input/by-id/usb-SONiX_USB_DEVICE-event-kbd",
+        "/dev/input/event0",
+        "/dev/input/event1",
+        "/dev/input/event2",
+        "/dev/input/event3",
+        "/dev/input/event4",
+        "/dev/input/event5",
+        "/dev/input/event6",
+        "/dev/input/event7",
+        "/dev/input/event8",
+        "/dev/input/event9",
+        "/dev/kvmfr0",
+        "/dev/userfaultfd"
+]
+如上所述，包含 ，替换 ，以及每个符号链接的路径。cgroup_device_aclevent-kbdevent-mouse/dev/input/eventX
+Restart libvirtd：
+sudo systemctl restart libvirtd
+需要时切换输入LEFT_CTRL+RIGHT_CTRL。
+4.1. 配置虚拟机
+虚拟机管理器 >> [打开] >> 查看 >> 详情 >> XML 概述>>
+
+替换并[应用]：</qemu:commandline>
+
+剧透
+  <qemu:arg value="-object"/>
+  <qemu:arg value="input-linux,id=kbd1,evdev=/dev/input/by-id/usb-SONiX_USB_DEVICE-event-kbd,grab_all=on,repeat=on"/>
+  <qemu:arg value="-object"/>
+  <qemu:arg value="input-linux,id=mouse1,evdev=/dev/input/by-id/usb-COMPANY_USB_Device-if01-event-mouse"/>
+</qemu:commandline>
+加入输入组：
+
+test $UID = 0 && exit
+sudo usermod -aG input $USER
+重启Linux PC。
