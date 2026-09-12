@@ -1,47 +1,47 @@
 ================================================================
-Nika 研究环境部署指南（Intel / AMD 通用版）
+Nika 研究环境部署指南（Intel / AMD 通用完整版）
 ================================================================
 
 用途声明：本文档仅用于反作弊防御技术研究——在可控实验
 环境中复现虚拟机指纹伪装方案，研究其检测面与防御措施。
 请遵守当地法律法规及目标平台服务条款。
 
+整体架构：
+  +----------+    +----------+    +------------+    +--------------+
+  | Linux PC | -> | QEMU/KVM | -> | Windows VM | -> | 目标游戏     |
+  +----------+    +----------+    +------------+    +--------------+
+
+三层伪装体系（研究核心）：
+  1. QEMU 补丁层（qemupatch.sh）   → 设备 ID / SMBIOS / ACPI 表伪装
+  2. 内核补丁层（kernelpatch 脚本） → CPUID / MSR / 计时反检测
+  3. 固件补丁层（ovmfpatch.sh）    → OVMF/SMBIOS 固件级伪装
+
 适用环境：
   - 宿主机：Fedora 44（KDE），内核 6.19.x
   - 硬件：双显卡机器（iGPU 留宿主机 + dGPU 直通给 VM）
-  - 产物：伪装 QEMU 11.0 + 伪装内核 + 伪装 OVMF
+  - 单显卡机器走 1.2 节 headless VNC 备选方案
 
 ----------------------------------------------------------------
-0. 架构总览与平台差异
+0. 架构总览与平台差异速查
 ----------------------------------------------------------------
 
-部署模型：
-  - iGPU（Intel UHD / AMD Radeon）→ 宿主机显示输出
-  - dGPU（NVIDIA=10de / AMD=1002）→ VFIO 直通给 VM
-  - 板载有线网卡 → 直通给 VM（宿主机用 WiFi 上网）
-  - 键鼠 → evdev 直通（VM 内按两下 Ctrl 释放/抓取）
-    注意：不要用 virt-manager 的 USB Host Device 直通单个
-    键鼠设备（研究人员反馈与封禁强相关；evdev 方式不受影响）
-  - 音频 → QEMU pipewire 后端直通宿主机声卡
+  | 项目                 | Intel                | AMD                          |
+  |----------------------|----------------------|------------------------------|
+  | CPU 虚拟化指令       | vmx                  | svm                          |
+  | IOMMU GRUB 参数      | intel_iommu=on iommu=pt | amd_iommu=on iommu=pt     |
+  | KVM 模块             | kvm_intel            | kvm_amd                      |
+  | 核显解码驱动         | intel-media-driver   | mesa-va-drivers-freeworld(swap) |
+  | qemupatch.sh 填写段  | *_8086               | *_1022（脚本按 CPU 自动选段）|
+  | 内核补丁             | intel619.mypatch      | 仓库 AMD 对应补丁（自动选） |
+  | XML cpu feature      | vmx                  | svm + topoext                |
+  | split_lock_detect=off | 需要                | 不需要（加上无害）           |
 
-三大编译产物：
-  1. qemupatch.sh    → /usr/local/bin/qemu-system-x86_64
-     （设备 ID / SMBIOS / ACPI 表伪装）
-  2. kernelpatch619.sh → 6.19 tkg 内核 + NIKA 补丁
-     （CPUID / MSR 层反检测）
-  3. ovmfpatch.sh    → OVMF_CODE_4M.patched.qcow2（固件层伪装）
-
-Intel / AMD 差异速查：
-
-  | 项目               | Intel                | AMD                        |
-  |--------------------|----------------------|----------------------------|
-  | CPU 虚拟化指令     | vmx                  | svm                         |
-  | IOMMU GRUB 参数    | intel_iommu=on iommu=pt | iommu=pt（IOMMU 默认开启）|
-  | KVM 模块           | kvm_intel            | kvm_amd                     |
-  | 核显解码驱动       | intel-media-driver   | mesa-va-drivers             |
-  | qemupatch.sh 填写段 | *_8086             | *_1022（脚本按 CPU 自动选段）|
-  | 内核补丁           | intel619.mypatch      | 仓库 AMD 对应补丁（自动选） |
-  | split_lock_detect=off | 需要             | 不需要（加上无害）          |
+键鼠方案说明（重要研究结论）：
+  - 本指南采用 evdev 直通（VM 内是 QEMU 模拟的 USB HID 设备）
+  - 不要用 virt-manager 的 USB Host Device 单设备直通——论坛
+    研究人员实测其与封禁强相关（USB Host Device → 快速封禁；
+    无 → 24h/30 场无封禁；PCI 控制器级直通 → 5h+ 无封禁）
+  - 结论：输入设备走"模拟"不走"直通"，PCI 级（网卡/xHCI）直通安全
 
 ----------------------------------------------------------------
 Phase 0：硬件验证（无需联网，先跑）
@@ -59,14 +59,112 @@ echo "=== 内核 ==="; uname -r
   - 虚拟化指令：Intel 机器输出 vmx / AMD 机器输出 svm
   - /dev/kvm 存在
   - IOMMU：Intel 有 "DMAR: IOMMU enabled" / AMD 有 "AMD-Vi" 相关行
-  - 双显卡：一块 iGPU + 一块 NVIDIA(10de) 或 AMD(1002) dGPU
+  - 显卡：双显卡机器一块 iGPU + 一块 NVIDIA(10de) 或 AMD(1002) dGPU
   - 内核 6.19.x
 
 ----------------------------------------------------------------
-Phase 1：系统基线（锁内核 + SELinux + 依赖，唯一一次联网装包）
+Phase 1：宿主机系统安装与基线
 ----------------------------------------------------------------
 
-1.1 锁内核（用精确列表，不要用 exclude=kernel*）
+1.1 Fedora 44 KDE 安装注意事项（README 1a）
+
+  - 安装镜像：Fedora 官网 KDE（或 XFCE）x86_64 ISO
+  - 安装时断开互联网，装完后也不要更新（保持内核 6.19.x 基线）
+  - 双显卡机器：安装 Fedora 前把 dGPU 上的线拔掉！
+    不然任务栏会被分配到 dGPU——这绝不允许发生
+  - Dolphin 文件管理器 → F10 → 配置 Dolphin... → 预览 →
+    取消勾选 [ ] 文件夹 → 应用
+
+1.2 单显卡备选方案：headless VNC（README 1b）
+
+  没有 iGPU 的机器用此方案（宿主机终端模式 + VNC 远程操作）：
+
+```bash
+sudo dnf install xorg-x11-drv-dummy x11vnc mingetty
+sudo firewall-cmd --permanent --add-service=vnc-server
+sudo systemctl set-default multi-user.target
+```
+
+  - 下载仓库里的 dummy.conf / headless.sh / autologin.sh 到 ~/Downloads：
+
+```bash
+cd ~/Downloads
+sudo cp dummy.conf /etc/X11/.
+#sudo cp headless.sh /etc/profile.d/.
+chmod +x autologin.sh
+./autologin.sh
+```
+
+  - 命令行连 WiFi：
+
+```bash
+nmcli radio wifi on
+nmcli device wifi connect <SSID> --ask
+```
+
+  - 记录宿主机 IP（VNC 连接用）：ip addr
+  - 重启后：
+    - VM 用虚拟 VGA 时（装系统阶段）：本地 startxfce4
+    - VM 用直通 GPU 时：cd ~/Downloads && chmod +x headless.sh && ./headless.sh
+  - 用手机/平板/笔记本的 VNC 客户端连接操作
+
+1.3 安装硬件解码器（README 1.1，在 libvirt 和 Steam 之前装）
+
+  按宿主机 iGPU / dGPU 厂商四选一：
+
+```bash
+# Intel Skylake 及更新（iGPU 解码）：
+sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install intel-media-driver
+
+# AMD（注意是 swap 替换，不是 install）：
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld
+
+# NVIDIA（dGPU 解码）：
+sudo dnf install libva-nvidia-driver
+
+# Firefox 硬件解码（H.264 等）：
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install ffmpeg --allowerasing
+```
+
+1.4 联网装依赖（全部 install，不要 update）
+
+```bash
+# 虚拟化组件
+sudo dnf install @virtualization -y
+
+# 编译工具
+# 踩坑：sudo dnf groupinstall "Development Tools" 在新版 dnf 不可用
+sudo dnf group install development-tools -y
+sudo dnf install git -y
+```
+
+1.5 libvirt 配置（README 1.2）
+
+```bash
+# qemu.conf：让 QEMU 以本机用户运行（音频需要）
+# "1000" 按实际 UID 替换（id -u 查看）
+sudo sed -i 's/^#user = "libvirt-qemu"/user = "1000"/' /etc/libvirt/qemu.conf
+
+# libvirtd.conf
+sudo sed -i 's/^#unix_sock_group = "libvirt"/unix_sock_group = "libvirt"/' /etc/libvirt/libvirtd.conf
+sudo sed -i 's/^#unix_sock_rw_perms = "0770"/unix_sock_rw_perms = "0770"/' /etc/libvirt/libvirtd.conf
+
+# 用户组 + 服务
+sudo usermod -aG libvirt $USER
+sudo systemctl enable libvirtd.service
+```
+
+  关 SELinux（Fedora 强制要求；Debian 则是停 AppArmor）：
+
+```bash
+sudo sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
+grep SELINUX= /etc/selinux/config    # 应为 disabled
+```
+
+1.6 锁内核（用精确列表，不要用 exclude=kernel*）
 
   踩坑：exclude=kernel* 会连 kernel-headers / kernel-devel
   一起锁死，后面编译 QEMU 时装不上依赖。直接用精确列表：
@@ -78,58 +176,53 @@ EOF
 grep exclude /etc/dnf/dnf.conf
 ```
 
-  说明：锁住的是启动内核本体；放开 kernel-headers /
-  kernel-devel（仅是编译头文件，不影响启动内核）。
+  锁住的是启动内核本体；放开 kernel-headers / kernel-devel
+  （仅是编译头文件，不影响启动内核）。
 
-1.2 关 SELinux
+1.7 virt-manager 偏好设置（建 VM 前必做，README 1.2 末尾）
 
-```bash
-sudo sed -i 's/^SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config
-grep SELINUX= /etc/selinux/config   # 应为 disabled
-```
+  - Virtual Machine Manager → Edit → Preferences → General →
+    勾选 [x] Enable XML editing → [Close]
+  - Virtual Machine Manager → Edit → Preferences → New VM →
+    Storage format: Raw → [Close]
 
-1.3 装依赖（全部用 install，不要 update）
-
-```bash
-# RPM Fusion 源
-sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm -y
-sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm -y
-
-# 核显硬件解码（二选一）
-sudo dnf install intel-media-driver -y      # Intel iGPU
-# sudo dnf install mesa-va-drivers -y       # AMD iGPU
-
-# 虚拟化组件
-sudo dnf install @virtualization -y
-
-# 编译工具
-# 踩坑：sudo dnf groupinstall "Development Tools" 在新版 dnf 不可用
-sudo dnf group install development-tools -y
-sudo dnf install git -y
-```
-
-1.4 libvirt 基础配置
+1.8 default 虚拟网络定制（README 1.2，VM 走 NAT 时需要）
 
 ```bash
-# qemu.conf：让 QEMU 以本机用户运行（pipewire 音频需要）
-# "1000" 按实际 UID 替换（id -u 查看）
-sudo sed -i 's/^#user = "libvirt-qemu"/user = "1000"/' /etc/libvirt/qemu.conf
-
-# libvirtd.conf
-sudo sed -i 's/^#unix_sock_group = "libvirt"/unix_sock_group = "libvirt"/' /etc/libvirt/libvirtd.conf
-sudo sed -i 's/^#unix_sock_rw_perms = "0770"/unix_sock_rw_perms = "0770"/' /etc/libvirt/libvirtd.conf
-
-# 用户组 + 服务
-sudo usermod -aG libvirt $USER
-sudo systemctl enable --now libvirtd.service
-groups    # 列表里应有 libvirt（没有则重启后生效）
+sudo -E virsh net-edit default
 ```
 
-1.5 踩坑：libvirtd 重启后不自启（Fedora 41+ 模块化 daemon 冲突）
+  按真机局域网风格改网段和 MAC（示例）：
+
+```xml
+<network>
+  <name>default</name>
+  <uuid>01234567-89ab-cdef-0123-456789abcdef</uuid>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <mac address='XX:XX:XX:XX:XX:XX'/>
+  <ip address='192.168.xxx.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.xxx.2' end='192.168.xxx.254'/>
+    </dhcp>
+  </ip>
+</network>
+```
+
+```bash
+sudo virsh net-destroy default
+sudo virsh net-start default
+sudo virsh net-autostart default
+```
+
+  踩坑：VM 通过 NAT 上网不通 → 宿主机防火墙放行 virbr0
+  （firewall-config 或 sudo firewall-cmd --zone=trusted
+  --add-interface=virbr0 --permanent 后 reload）。
+
+1.9 踩坑：libvirtd 重启后不自启（Fedora 41+ 模块化 daemon 冲突）
 
   Fedora 41+ 默认启用模块化 daemon（virtqemud、virtnetworkd
-  等），开机时和老的 libvirtd 抢启动，模块化赢了就把 libvirtd
-  干掉。解法：模块化全家禁掉，只留 libvirtd：
+  等），开机时和老的 libvirtd 抢启动。解法：模块化全家禁掉：
 
 ```bash
 sudo systemctl disable --now \
@@ -144,34 +237,39 @@ sudo systemctl disable --now \
   virtinterfaced.socket virtinterfaced-ro.socket virtinterfaced-admin.socket 2>/dev/null
 
 sudo systemctl enable --now libvirtd.service
-sudo systemctl is-active libvirtd     # active
 ```
 
-1.6 重启验证
+1.10 重启验证
 
 ```bash
 sudo reboot
 # 回来后依次确认：
-getenforce                           # Disabled（还是 Enforcing 就再重启一次）
+getenforce                            # Disabled（还是 Enforcing 就再重启一次）
 uname -r                              # 内核版本未变
 sudo systemctl is-active libvirtd     # active
+groups                                # 含 libvirt（没有则再重启一次）
 ```
 
-1.7 桌面细节（README 1a 节要求，可选）
-
-  Dolphin → F10 → 配置 Dolphin → 预览 → 取消勾选 [文件夹] → 应用
-
 ----------------------------------------------------------------
-Phase 2：KVM 模块 + VFIO 绑定 dGPU
+Phase 2：BIOS + KVM 模块 + VFIO 绑定 dGPU
 ----------------------------------------------------------------
 
-2.1 内核模块配置（Intel / AMD 按平台启用对应行）
+2.1 BIOS 设置（README 3，开机进 BIOS）
+
+  - 启用 Virtualization Technology：
+    Intel 开 VT-d（VMX）；AMD 开 AMD-Vi（SVM）
+  - 启用 "IOMMU"
+  - 禁用 "Above 4G Decoding"（重要，直通 BAR 映射需要）
+
+2.2 内核模块配置（README 3）
 
 ```bash
 sudo tee /etc/modprobe.d/kvm.conf << 'EOF'
 options kvm_intel nested=1
 #options kvm_amd nested=1
 options kvm ignore_msrs=0
+softdep radeon pre: vfio-pci
+softdep amdgpu pre: vfio-pci
 softdep nouveau pre: vfio-pci
 softdep nvidia pre: vfio-pci
 EOF
@@ -179,16 +277,21 @@ sudo dracut -f
 ```
 
   AMD 机器：注释 kvm_intel 行，放开 kvm_amd 行。
+  softdep 四行按实际情况保留（直通 NVIDIA 卡至少留 nouveau/nvidia 两行）。
 
-2.2 找出 dGPU 的全部 PCI ID
+2.3 找出 dGPU 的全部 PCI ID（README 3.1）
 
 ```bash
-lspci -nn | grep -E "10de|1002"
+lspci -v | grep -i VGA          # 找显卡位置
+lspci -n -s 01:00               # 按实际总线号，拿数字 ID
 ```
 
-  记下 dGPU 本体 + 它的 HDMI 音频两个 ID（形如 10de:xxxx, 10de:yyyy）。
+  说明：NVIDIA dGPU 可能有多个功能（VGA / HDMI 音频 /
+  USB 3.1 控制器 / Type-C UCSI），记下全部 ID。
+  vfio-pci.ids 只需填 VGA + 音频两个（USB/Type-C 功能
+  即使不绑 vfio 也不影响，xhci_hcd 由 libvirt 接管管理）。
 
-2.3 改 GRUB
+2.4 改 GRUB（README 3.1）
 
 ```bash
 sudo cp /etc/default/grub /etc/default/grub.bak
@@ -201,26 +304,32 @@ sudo nano /etc/default/grub
   GRUB_CMDLINE_LINUX="nofb vfio-pci.ids=10de:xxxx,10de:yyyy split_lock_detect=off intel_iommu=on iommu=pt mitigations=auto"
 
   AMD 平台：
-  GRUB_CMDLINE_LINUX="nofb vfio-pci.ids=1002:xxxx,1002:yyyy iommu=pt mitigations=auto"
+  GRUB_CMDLINE_LINUX="nofb vfio-pci.ids=1002:xxxx,1002:yyyy amd_iommu=on iommu=pt mitigations=auto"
 
-  可选调优（对抗计时异常检测，配合 VM XML 的 cputune 绑核）：
+  调优（对抗计时异常检测，配合 VM 的 cputune 绑核）：
   追加 cpuset.sched_load_balance=0 processor.max_cstate=1
+
+  单显卡 headless 方案：vfio-pci.ids 可省略（宿主机本就在
+  终端模式，可用 CTRL+ALT+F2/F3 切换 TTY）。
 
 ```bash
 sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 sudo reboot
 ```
 
-2.4 验证 VFIO 绑定（关键）
+2.5 验证 VFIO 绑定（关键）
 
 ```bash
 lspci -k -s 01:00    # 总线号按实际
 ```
 
-  判定：VGA 和 Audio 两行都要显示 Kernel driver in use: vfio-pci
+  判定：
+  - VGA 和 Audio 两行显示 Kernel driver in use: vfio-pci
+  - dGPU 的 USB 功能行显示 xhci_hcd 属正常（不加载为模块，
+    由 libvirt 管理）
 
 ----------------------------------------------------------------
-Phase 3：伪装编译（QEMU + 内核 + OVMF）
+Phase 3：伪装编译（QEMU + OVMF + 内核）
 ----------------------------------------------------------------
 
 3.0 准备仓库
@@ -229,7 +338,7 @@ Phase 3：伪装编译（QEMU + 内核 + OVMF）
 cd ~
 git clone <项目地址> nika
 cd nika
-# 或 U 盘拷贝到 ~/nika。确认四个关键文件：
+# 或 U 盘拷贝到 ~/nika。确认关键文件：
 ls qemupatch.sh kernelpatch619.sh ovmfpatch.sh intel619.mypatch
 ```
 
@@ -240,36 +349,39 @@ ls qemupatch.sh kernelpatch619.sh ovmfpatch.sh intel619.mypatch
 git config --global url."https://gh-proxy.com/https://github.com/".insteadOf "https://github.com/"
 ```
 
-3.1 收集本机 PCI ID → 填 qemupatch.sh
+3.1 收集本机 PCI ID → 填 qemupatch.sh（README 7）
 
 ```bash
 lspci -nn
 ```
 
   qemupatch.sh 会自动检测 CPU 厂商：Intel 用 *_8086 段，
-  AMD 用 *_1022 段。把自己机器 lspci 输出里对应类别设备的
-  ID 填进对应段（示例为 9 代 Intel 移动平台真实值）：
+  AMD 用 *_1022 段。把自己 lspci -nn 输出里对应类别设备的
+  ID 填进对应段：
 
-  | 变量（Intel / AMD）            | 对应 lspci 设备类别          | 示例   |
-  |--------------------------------|------------------------------|--------|
-  | lpc_8086 / lpc_1022            | ISA bridge（芯片组 LPC/eSPI）| a30d   |
-  | smbus_8086 / smbus_1022        | SMBus Controller             | a323   |
-  | hdaudio_8086 / hdaudio_1022   | Audio device（PCH 声卡）     | a348   |
-  | hdaname_8086 / hdaname_1022   | 该声卡的描述文本             | Cannon Lake PCH cAVS |
-  | sata_8086 / sata_1022         | SATA AHCI Controller         | a353   |
-  | rootport_8086 / rootport_1022 | dGPU 所在的 PCIe Root Port   | 1901   |
-  | xhci_8086 / xhci_1022          | USB xHCI Host Controller     | a36d   |
-  | hostbridge_8086 / hostbridge_1022 | Host bridge / DRAM Registers | 3ec4 |
-  | pcibridge_8086 / pcibridge_1022 | PCH PCI bridge / Shared SRAM | a36f   |
+  | 变量（Intel / AMD）                | 对应 lspci 设备类别           | 示例   |
+  |------------------------------------|-------------------------------|--------|
+  | lpc_8086 / lpc_1022                | ISA bridge（芯片组 LPC/eSPI） | a30d   |
+  | smbus_8086 / smbus_1022            | SMBus Controller              | a323   |
+  | hdaudio_8086 / hdaudio_1022        | Audio device（PCH 声卡）      | a348   |
+  | hdaname_8086 / hdaname_1022        | 该声卡的完整描述文本          | Cannon Lake PCH cAVS |
+  | sata_8086 / sata_1022             | SATA AHCI / NVMe 控制器       | a353   |
+  | rootport_8086 / rootport_1022      | dGPU 所在的 PCIe Root Port     | 1901   |
+  | xhci_8086 / xhci_1022             | USB xHCI Host Controller      | a36d   |
+  | hostbridge_8086 / hostbridge_1022 | Host bridge / DRAM Registers  | 3ec4   |
+  | pcibridge_8086 / pcibridge_1022   | PCH PCI bridge / Shared SRAM  | a36f   |
+
+  rootport 填法说明（README 作者示例）：
+  dGPU 挂在 Root Port #8（a0bf）时填 a0b8（#8-7=#1 的 ID），
+  即填"端口号减 7"的那个 Root Port ID，让 guest 枚举出
+  正常的 #1 端口。若你的 root port 本身就是 #1，直接填真实值。
 
   填错反作弊伪装就露馅，必须用真机数据。
-  AMD 平台同理：从自己的 lspci -nn 输出里找 FCH/芯片组对应
-  类别设备，填 *_1022 段。
 
-3.2 编译伪装 QEMU
+3.2 编译伪装 QEMU（README 7）
 
 ```bash
-# 1. 编译依赖
+# 1. 编译依赖（Fedora 44）
 sudo dnf install acpica-tools bzip2-devel gcc git glib2-devel libfdt-devel \
   libusb1-devel libuuid-devel ninja-build pipewire-devel pixman-devel \
   SDL2_image-devel spice-server-devel usbredir-devel zlib-ng-compat-devel -y
@@ -300,9 +412,19 @@ ls -lh /usr/local/bin/qemu-system-x86_64
 # 必须是几十 MB 的真实文件，且日期是刚才
 ```
 
-3.3 编译伪装内核
+  Debian 13 依赖安装：sudo apt install acpica-tools && sudo apt build-dep qemu
+
+3.3 编译伪装 OVMF（README 7.1）
 
 ```bash
+sudo dnf install g++ nasm python3-virt-firmware -y
+./ovmfpatch.sh
+```
+
+3.4 编译伪装内核（README 7.3）
+
+```bash
+sudo dnf install util-linux-script -y    # 脚本依赖（Fedora）
 ./kernelpatch619.sh
 ```
 
@@ -310,8 +432,8 @@ ls -lh /usr/local/bin/qemu-system-x86_64
     AMD → 仓库对应 AMD 补丁），不用手动选
   - 提示 CPU 架构优化时输入 native 回车
   - 编译 40-90 分钟。趁编译提前准备：
-    Windows 10 20H1 ISO（win-10-2004-english-x-64 + KB4598291，
-    README 有 archive.org 链接，国内慢可用多线程下载器）
+    Windows 10 20H1 ISO（win-10-2004-english-x-64 + KB4598291 补丁，
+    README 有 archive.org 链接，国内慢可用多线程下载器拉）
 
   装三个 RPM（devel/headers 是给后面编译内核模块用的）：
 
@@ -320,8 +442,6 @@ cd linux-tkg/RPMS
 sudo rpm -ivh kernel-<版本>_tkg_eevdf-1.x86_64.rpm \
             kernel-devel-<版本>_tkg_eevdf-1.x86_64.rpm \
             kernel-headers-<版本>_tkg_eevdf-1.x86_64.rpm
-sudo grub2-mkconfig -o /boot/grub2/grub.cfg
-sudo reboot
 ```
 
   踩坑：与已装的官方/仓库 kernel-headers 版本冲突时
@@ -330,6 +450,13 @@ sudo reboot
 ```bash
 sudo dnf remove kernel-headers-<旧版本> -y
 # 再执行上面的 rpm -ivh（必要时加 --replacefiles）
+```
+
+  改 GRUB 追加 mitigations=auto（README 7.3），然后：
+
+```bash
+sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+sudo reboot
 ```
 
   重启后验证：
@@ -359,53 +486,584 @@ lspci -k -s 01:00 | grep "Kernel driver"    # 仍为 vfio-pci
 
   变回 nouveau 了 → sudo dracut -f 后重启。
 
-3.4 编译伪装 OVMF
+3.5 收集 SMBIOS 数据（建 VM 时要填真实值，README 2.1）
 
 ```bash
-sudo dnf install g++ nasm python3-virt-firmware -y
-./ovmfpatch.sh
-```
-
-3.5 收集 SMBIOS 数据（建 VM 时要填真实值）
-
-```bash
-sudo dmidecode -t 1 -t 2 -t 3 > ~/smbios.txt
+sudo dmidecode -t 1 -t 2 -t 3 -t 4 -t 17 > ~/smbios.txt
 cat ~/smbios.txt
 ```
 
   （注意拼写是 dmidecode，别少个 m）
+  需要 type 1（系统）/ 2（主板）/ 3（机箱）/ 4（CPU，含
+  max-speed）/ 17（内存条）。
 
 ----------------------------------------------------------------
-Phase 4：Windows VM 创建（简要，详见 README）
+Phase 4：创建 Windows VM（README 2 + 2.1 + 2.2）
 ----------------------------------------------------------------
 
-  用 virt-manager 建 Win10 VM，要点：
-  - 固件选 OVMF_CODE_4M.patched.qcow2 + 对应 VARS 模板
-  - CPU host-passthrough，topology 填真机规格
-    （如 6 核 12 线程机器：cores=6 threads=2——过线程数检测）
-  - cputune：vcpupin 按宿主机 lscpu -e 的核号绑核
-    （过计时异常检测）
-  - pm：suspend-to-mem 启用 + acpitable 电池 SSDT
-    （过电源能力检测，VM 内 powercfg /a 应出现 S3）
-  - SMBIOS 填 3.5 收集的真实值
-  - dGPU / 有线网卡 hostdev 直通；键鼠用 qemu:commandline
-    的 evdev（input-linux），并在 qemu.conf 的
-    cgroup_device_acl 里放行 /dev/input/by-id/ 路径
-  - 音频后端 pipewire（依赖 1.4 的 user 配置）
-  - 验证：VMAware 2.6 应全绿
+4.1 virt-manager 建 VM 骨架（README 2）
 
-  VM 侧踩坑：
-  - NVIDIA 驱动报"没有兼容硬件" → 设备管理器 → 更新驱动
-    → 浏览我的计算机 → 从驱动解压目录手动选 nv_dispi.inf 安装
-  - 不要装 SetupChipset.exe 之类芯片组驱动包——会接管输入
-    设备，破坏 evdev 键鼠直通（中招后进安全模式卸载）
-  - VM 网络不通 → 宿主机防火墙放行 virbr0
+  Virtual Machine Manager → File → New Virtual Machine：
+  1. Manual install → Forward
+  2. 命名 win10 → Memory / CPU 按需 → Forward
+  3. 取消勾选 [ ] Enable storage for this virtual machine → Forward
+  4. 勾选 [x] Customize configuration before install → Finish
+  5. Overview：Chipset 选 Q35，Firmware 选 OVMF_CODE_4M.secboot
+     （或直接选编译好的 OVMF_CODE_4M.patched.qcow2，一步到位）
+  6. NIC :xx:xx:xx：Device model 输入 rtl8125（手输），
+     MAC address 填真机网卡 MAC → Apply
+  7. Video QXL：Model 改为 VGA → Apply
+  8. [Add Hardware] → Storage → Select or create custom storage →
+     [Manage...] → [+] → 名称 win10、格式 Raw、Capacity 240 GiB →
+     Finish → Cancel → Cancel
+  9. [Begin Installation] → 立即 Virtual Machine → Shut Down →
+     Force Off（只是先触发一次配置生成，不真的装）
+
+4.2 XML 大改（README 2.1 + 2.2 + 7 + 7.1，共 12 刀，每刀贴完点 Apply）
+
+  打开方式：VM → [Open] → View → Details → Overview → XML。
+
+  刀 1：替换 <domain type="kvm"> 开头（SATA 控制器 + 磁盘）
+
+```xml
+<domain type="kvm" xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+  <qemu:commandline>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ahci,id=device-sata1,addr=07.0"/>
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/var/lib/libvirt/images/win10.img,format=raw,cache=none,discard=ignore,if=none,id=drive-sata1-0"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,serial=YOUR_SERIAL_HERE"/>
+  </qemu:commandline>
+```
+
+  serial 填真机磁盘序列号。
+  设置磁盘权限：
+  sudo chmod 777 /var/lib/libvirt/images/win10.img
+
+  踩坑（实测）：此刀贴完后 virt-manager 自动生成的 IDE
+  CD-ROM 设备必须删掉，否则报
+  "QEMU unexpectedly closed the monitor: Bus 'ide.0' not found"。
+  挂载 Windows ISO 也走 qemu:commandline（加 SATA 光驱）：
+
+```xml
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/home/用户/下载/win10.iso,format=raw,read-only=on,if=none,id=drive-sata1-1"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-cd,bus=device-sata1.1,drive=drive-sata1-1,id=sata1-1"/>
+```
+
+  刀 2：SMBIOS 伪装（替换 </qemu:commandline> 前追加）
+  用 3.5 收集的真机 dmidecode 数据填（示例为模板，勿直接抄）：
+
+```xml
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=1,manufacturer=<真机厂商>,product=<真机型号>,version=<版本>,serial=<序列号>"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=2,manufacturer=<主板厂商>,product=<主板型号>,version=<版本>,serial=<序列号>"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=3,manufacturer=<机箱厂商>,version=<版本>,serial=<序列号>"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=4,sock_pfx=<插座前缀>,manufacturer=<CPU厂商>,version=<CPU完整型号>,max-speed=<最大睿频MHz>,current-speed=<基频MHz>"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=17,manufacturer=<内存厂商>,part=<内存PartNo>,speed=<频率>,serial=<序列号>"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Keyboard,connector_type=0x0F,port_type=0x0D"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=8,internal_reference=J1A1,external_reference=Mouse,connector_type=0x0F,port_type=0x0E"/>
+    <qemu:arg value="-smbios"/>
+    <qemu:arg value="type=9,slot_designation=J6C1,slot_type=0xAA,slot_data_bus_width=0x0D,current_usage=0x04,slot_length=0x04,slot_id=0x01,slot_characteristics1=0x04,slot_characteristics2=0x03"/>
+```
+
+  说明：type 4 的 max-speed 用真机睿频（如 i7-9750H 填
+  4500），VMAware 用它与 CPUID 对比。
+
+  刀 3：vmware metadata（替换 </metadata>）
+
+```xml
+    <vmware xmlns="http://www.vmware.com/schema/vmware.config">
+      <config>
+        <entry name="hypervisor.cpuid.v0" value="FALSE"/>
+      </config>
+    </vmware>
+```
+
+  刀 4：内存与 vCPU（从 <memory> 到 <vcpu> 整段替换）
+  用商业内存规格（8/16/24 GiB），vCPU 填真机线程数：
+
+```xml
+  <memory unit="GiB">16</memory>
+  <currentMemory unit="GiB">16</currentMemory>
+  <vcpu placement="static">12</vcpu>
+```
+
+  刀 5：features + CPU + clock（从 <features> 到 </clock> 整段替换）
+  下例为 Intel 6 核 12 线程机器；AMD 机器把 vmx 换成
+  svm + topoext（Intel 不要 svm，反之亦然——真实 CPU 不会
+  同时暴露两种虚拟化指令，双写反而是异常指纹）：
+
+```xml
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode="custom">
+      <relaxed state="off"/>
+      <vapic state="off"/>
+      <spinlocks state="off"/>
+      <vpindex state="off"/>
+      <runtime state="off"/>
+      <synic state="off"/>
+      <stimer state="off"/>
+      <reset state="off"/>
+      <vendor_id state="off"/>
+      <frequencies state="off"/>
+      <reenlightenment state="off"/>
+      <tlbflush state="off"/>
+      <ipi state="off"/>
+      <evmcs state="off"/>
+      <avic state="off"/>
+    </hyperv>
+    <kvm>
+      <hidden state="on"/>
+    </kvm>
+    <ioapic driver="kvm"/>
+    <msrs unknown="fault"/>
+    <pmu state="on"/>
+    <smm state="on"/>
+    <vmport state="off"/>
+    <ps2 state="on"/>
+  </features>
+  <cpu mode="host-passthrough" check="none" migratable="off">
+    <topology sockets="1" dies="1" clusters="1" cores="6" threads="2"/>
+    <cache mode="passthrough"/>
+    <feature policy="disable" name="hypervisor"/>
+    <feature policy="require" name="vmx"/>
+    <feature policy="require" name="x2apic"/>
+    <feature policy="require" name="spec-ctrl"/>
+    <feature policy="require" name="stibp"/>
+    <feature policy="require" name="ssbd"/>
+  </cpu>
+  <clock offset="localtime">
+    <timer name="tsc" present="yes" tickpolicy="discard" mode="native"/>
+    <timer name="hpet" present="yes"/>
+    <timer name="rtc" present="yes"/>
+    <timer name="pit" present="yes"/>
+    <timer name="kvmclock" present="no"/>
+    <timer name="hypervclock" present="no"/>
+  </clock>
+```
+
+  说明：
+  - hyperv 全 off + kvm hidden + hypervisor disable → 过
+    CPUID 签名检测
+  - kvmclock/hypervclock 关、tsc native → 过计时异常检测
+  - topology 必须填真机规格（过线程数检测）
+  - dies/clusters 是新版 libvirt 显式写法，老版本默认 1
+
+  刀 6：内存气球（替换 <memballoon ...> 整段）
+
+```xml
+  <memballoon model="none"/>
+```
+
+  刀 7：音频（替换 <audio id="1" type="spice"/>，可选）
+  pipewire 后端直通宿主机声卡（依赖 Phase 1 的 user="1000"）：
+
+```xml
+  <audio id="1" type="pipewire" runtimeDir="/run/user/1000">
+    <input name="qemuinput"/>
+    <output name="qemuoutput"/>
+  </audio>
+```
+
+  刀 8：删多余设备（GUI 里逐个 [Remove]）
+  - Tablet（输入平板）
+  - Serial 1
+  - Channel (spice)
+  - Controller VirtIO Serial 0
+  - 以及 2.2 节的 10 个多余 pcie-root-port（XML 里删
+    controller index="5" 到 "14" 整段；保留 0-4）
+
+  刀 9：os 段整段替换（README 7.1，换伪装 OVMF）
+  去掉 firmware='efi' 属性和 <firmware> 块，手动指定
+  patched 固件（4.1 步骤 5 若已选 patched 可跳过）：
+
+```xml
+  <os>
+    <type arch="x86_64" machine="pc-q35-11.0">hvm</type>
+    <loader readonly="yes" secure="yes" type="pflash" format="qcow2">/usr/share/edk2/ovmf/OVMF_CODE_4M.patched.qcow2</loader>
+    <nvram format="qcow2">/usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2</nvram>
+    <bootmenu enable="yes"/>
+  </os>
+```
+
+  踩坑：保留 firmware='efi' 会报"无法使用基于功能的固件自动
+  选择 / 找不到与当前配置兼容的 efi 固件"——手写 loader/nvram
+  后必须删掉该属性和 <firmware> 块。
+  确认 machine 是 pc-q35-11.0（伪装 QEMU 按此机型构建）。
+
+  刀 10：pm + emulator 路径（README 7，从 <pm> 到 </emulator>）
+  启用 S3 休眠（过 power capabilities 检测）+ 指定伪装 QEMU：
+
+```xml
+  <pm>
+    <suspend-to-mem enabled="yes"/>
+    <suspend-to-disk enabled="no"/>
+  </pm>
+  <devices>
+    <emulator>/usr/local/bin/qemu-system-x86_64</emulator>
+```
+
+  验证：sudo virsh dumpxml win10 | grep emulator
+  应输出 /usr/local/bin/qemu-system-x86_64
+
+  刀 11：电池 ACPI 表（README 7，追加到 </qemu:commandline> 前）
+
+```xml
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt1.aml"/>
+    <qemu:arg value="-acpitable"/>
+    <qemu:arg value="file=/usr/local/bin/ssdt2.aml"/>
+```
+
+  ssdt1/ssdt2.aml 由 qemupatch.sh 生成（模拟笔记本电池等），
+  VM 里应出现电池图标。
+
+  刀 12：cputune 绑核（README 7，VM 启动前生效）
+  按宿主机 lscpu -e 的 CPU 编号绑核（过计时异常检测，
+  任务管理器 CPU 速度也会显示正常）。4 核 8 线程示例：
+
+```xml
+  <vcpu placement="static">8</vcpu>
+  <cputune>
+    <vcpupin vcpu="0" cpuset="0"/>
+    <vcpupin vcpu="1" cpuset="1"/>
+    <vcpupin vcpu="2" cpuset="2"/>
+    <vcpupin vcpu="3" cpuset="3"/>
+    <vcpupin vcpu="4" cpuset="4"/>
+    <vcpupin vcpu="5" cpuset="5"/>
+    <vcpupin vcpu="6" cpuset="6"/>
+    <vcpupin vcpu="7" cpuset="7"/>
+  </cputune>
+```
+
+  12 核 24 线程（dies=2）示例：vcpupin 0-23 对应
+  cpuset 0-23，topology 写 cores="6" dies="2" threads="2"。
+  宿主机核号查看：lscpu -e（CORE 列即真核号，超线程对
+  共享同一 CORE 号，如 6 核 12 线程显示 CORE 0-5 两轮）。
+
+  可选增强（实测调优）：加 iothread 并把 QEMU 主线程/
+  iothread 钉到固定核，减少调度抖动：
+
+```xml
+  <iothreads>1</iothreads>
+  <cputune>
+    ...vcpupin 同上...
+    <emulatorpin cpuset="0"/>
+    <iothreadpin iothread="1" cpuset="1"/>
+  </cputune>
+```
+
+  验证绑核生效：
+  for p in $(pgrep -f guest=win10); do taskset -pc $p; done
+
+4.3 装 Windows + 显卡驱动（README 3.2）
+
+  1. 启动 VM，从挂载的 ISO 安装 Windows 10 20H1，
+     装完打 KB4598291 补丁（CR3 shuffle 依赖此版本）
+  2. 关机 → VM → Details → [Add Hardware] → PCI Host Device：
+     添加 dGPU 的每个功能（VGA + Audio [+ USB + Type-C]）→ Finish
+  3. 开机装 NVIDIA/AMD 显卡驱动
+     踩坑：NVIDIA 驱动装不上提示"没有兼容硬件" →
+     设备管理器 → 显示适配器 → 更新驱动 → 浏览我的计算机
+     → 从驱动解压目录手动选 nv_dispi.inf 安装
+  4. NVIDIA 控制面板 → shader cache size 设为 10 GiB
+  5. 踩坑：VM 里不要装 SetupChipset.exe 之类芯片组驱动包
+     ——会接管输入设备破坏 evdev 键鼠直通（中招后进安全
+     模式卸载：开机强制断电三次触发恢复环境 → 疑难解答 →
+     高级选项 → 启动设置 → 安全模式）
 
 ----------------------------------------------------------------
-Phase 5：日常更新与重编译
+Phase 5：外设与网络
 ----------------------------------------------------------------
 
-5.1 判断要不要重编译
+5.1 键鼠 evdev 直通（README 4 + 4.1）
+
+  1. 找出鼠标键盘（README 4）：
+
+```bash
+ls -l /dev/input/by-id/
+# 认 event-mouse 结尾的是鼠标，event-kbd 结尾的是键盘
+# 例：
+# usb-Logitech_G102_...-event-mouse -> ../event5
+# usb-SEMICO_USB_Gaming_Keyboard-event-kbd -> ../event14
+```
+
+  2. /etc/libvirt/qemu.conf 的 cgroup_device_acl 加入
+     键鼠路径 + 对应的 event 节点（模板）：
+
+```
+cgroup_device_acl = [
+    "/dev/null", "/dev/full", "/dev/zero",
+    "/dev/random", "/dev/urandom",
+    "/dev/ptmx", "/dev/kvm", "/dev/kqemu",
+    "/dev/rtc", "/dev/hpet",
+    "/dev/input/by-id/usb-<鼠标>-event-mouse",
+    "/dev/input/by-id/usb-<键盘>-event-kbd",
+    "/dev/input/event0",
+    "/dev/input/event1",
+    "/dev/input/event2",
+    ...（把 by-id 里链接指向的 eventX 全列上）
+    "/dev/kvmfr0",
+    "/dev/userfaultfd"
+]
+```
+
+  3. 重启 libvirtd：sudo systemctl restart libvirtd
+
+  4. XML 里加 evdev 对象（追加到 </qemu:commandline> 前）：
+
+```xml
+    <qemu:arg value="-object"/>
+    <qemu:arg value="input-linux,id=kbd1,evdev=/dev/input/by-id/usb-<键盘>-event-kbd,grab_all=on,repeat=on"/>
+    <qemu:arg value="-object"/>
+    <qemu:arg value="input-linux,id=mouse1,evdev=/dev/input/by-id/usb-<鼠标>-event-mouse"/>
+```
+
+  5. 加入 input 组（README 4.1）：
+
+```bash
+sudo usermod -aG input $USER
+sudo reboot
+```
+
+  6. 使用：LEFT_CTRL + RIGHT_CTRL 在宿主机/VM 间切换输入。
+
+  换不同型号键鼠时改 3 处：qemu.conf 的 ACL 路径、XML 的
+  evdev 路径、（必要时）by-id 指向的 eventX 号。
+
+5.2 网络方案（README 7.2，四选一）
+
+  通用前置步骤：
+  - Details 里删 USB Redirector 2、USB Redirector 1
+  - Controller USB 0 → Model 手输 none → Apply
+  - [Add Hardware] → PCI Host Device → 板载 USB 3.x xHCI
+    Host Controller → Finish（整机 USB 控制器直通）
+  - 删掉 NIC :xx:xx:xx（rtl8125 那块虚拟网卡）
+  - 开 VM → 设备管理器 → 查看 → 显示隐藏设备 →
+    Intel(R) 82574L Gigabit Network Connection → 卸载设备
+
+  方案 A（推荐，实测干净）：PCI 直通板载网卡
+  - [Add Hardware] → PCI Host Device → 板载有线网卡 → Finish
+  - 宿主机用 WiFi 上网，VM 独占有线口（IP 由家里路由器分配）
+  - VM 侧 Realtek 驱动 Win10 自带
+
+  方案 B：rtl8125 虚拟网卡（README 7.2.1b）
+  - [Add Hardware] → Network → MAC 填真机网卡 MAC →
+    Device model 手输 rtl8125 → Finish
+  - qemupatch.sh 已把 QEMU 的 e1000 模拟改成 RTL8125 2.5G
+
+  方案 C：USB 网卡（README 7.2.1a）
+  - USB 网卡插在直通给 VM 的 xHCI 控制器口上，即插即用
+
+  方案 D：virtio（README 7.2.1c，性能最好但步骤多）
+  - 下载 virtio-win.iso（fedorapeople.org 最新版）
+  - XML 追加 virtio ISO 光驱：
+
+```xml
+    <qemu:arg value="-drive"/>
+    <qemu:arg value="file=/home/用户/Downloads/virtio-win.iso,format=raw,read-only=on,if=none,id=drive-sata1-1"/>
+    <qemu:arg value="-device"/>
+    <qemu:arg value="ide-cd,bus=device-sata1.1,drive=drive-sata1-1,id=sata1-1"/>
+```
+
+  - 删 vars.sh，重跑 qemupatch.sh 和 ovmfpatch.sh
+  - 下载 virtio.cmd 到 VM 桌面 network 文件夹并运行（从
+    CDROM 拷贝必要文件）
+  - 关 VM → [Add Hardware] → Network → Device model: virtio →
+    MAC 填真机 MAC → Finish
+  - 开 VM → 设备管理器从 network 文件夹装 virtio 网卡驱动
+  - 管理员 CMD 关测试签名后重启：bcdedit /set testsigning off
+
+5.3 音频验证
+
+  播放音乐，VM 内"扬声器/High Definition Audio"音量条会动、
+  宿主机有声即成功。无声 + QEMU 日志报 "Failed to connect
+  to PipeWire instance: Host is down" → 检查 qemu.conf 的
+  user="1000"（UID 必须是当前登录用户）。
+
+----------------------------------------------------------------
+Phase 6：显示输出与 Nika 运行（README 5 + 6）
+----------------------------------------------------------------
+
+6.1 桌面环境设置（README 5，按所用桌面选）
+
+  KDE：
+  - System Settings → Window Management → Window Rules →
+    Import... → 导入仓库里的 GLFW.kwinrule
+  - System Settings → Display & Monitor → Scale: 100%
+
+  XFCE（headless/VNC 方案常用）：
+  - 底部任务栏右键 → Panel → Panel Preferences → 点 [-]
+    删除当前面板 → Remove
+  - 顶部任务栏右键 → Panel → Panel Preferences →
+    Automatically hide the panel: Always
+  - Applications → Settings → Window Manager Tweaks →
+    Accessibility → 勾选 Hide title of windows when maximized
+
+  MATE：
+  - 顶部任务栏右键 → Add to Panel → Window List → Add
+  - 底部任务栏 → Delete This Panel
+  - 顶部任务栏 → Properties → Orientation: Bottom →
+    勾选 Show hide buttons
+
+6.2 关闭虚拟显卡
+
+  VM → Details → Video VGA → Model: None → Apply
+  （此后显示输出全部来自直通 GPU）
+
+6.3 显示方案三选一（README 5 对照表）
+
+  | 方案            | 延迟     | ESP          | 缺点               |
+  |-----------------|----------|--------------|--------------------|
+  | 直连线          | 0 ms     | Glow         | 串流画面叠第二屏   |
+  | 采集卡          | 30-300ms | Overlay+Glow | 需购卡             |
+  | Steam Remote Play | 10 ms | Overlay+Glow | 编码视频流         |
+
+  6.3.1 直连线（README 5.1）：显示器直插直通 GPU
+
+  6.3.2 采集卡（README 5.2）：采集卡接直通 GPU，宿主机开原始流：
+
+```bash
+gst-launch-1.0 -v v4l2src device=/dev/video0 ! \
+  video/x-raw,width=1920,height=1080,framerate=60/1 ! \
+  videoconvert ! autovideosink
+```
+
+  6.3.3 Steam Remote Play（README 5.3）
+
+```bash
+# Fedora 装 Steam（含 RPM Fusion）：
+sudo dnf install https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install steam
+# CA 证书软链（Steam 连接问题必修）：
+sudo ln -s /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt
+```
+
+  研究要点（README 5.3）：
+  - Linux 主机名和 MAC 会出现在 guest 的 ARP 表里
+  - 主机名改成磁盘序列号风格：
+    sudo hostnamectl set-hostname YOUR_SERIAL_HERE
+  - 每次重启换 MAC：
+    sudo macchanger -r <网卡名>
+  - Steam → Settings → Remote Play → Computers & Devices →
+    DESKTOP-XXXXXX → [Connect]（VM 里确认弹窗）
+  - 踩坑：点连接没反应 → 宿主机防火墙放行 virbr0
+
+6.4 运行 Nika（README 6）
+
+```bash
+cd <仓库目录>
+chmod +x nika
+sudo -E ./nika
+```
+
+  启动时 "[NIKA] kvm connector init: error" 属正常——
+  未装 memflow-kvm 时 KVM 通道初始化失败，QEMU 通道正常。
+
+6.5 功能键速查（README Features）
+
+  | 按键                     | 功能                                   |
+  |--------------------------|----------------------------------------|
+  | 5 / 6 / 7 / 8 / 9 / 0    | 循环 LIGHT/ENERGY/SHOTGUN/HEAVY/SNIPER/GEAR 物品 |
+  | BACKSPACE                | 清除物品标记                           |
+  | RMB（FOV 圈内按住）      | skynade 抛物线自瞄（可隔掩体）         |
+  | SHIFT                    | triggerbot 开火 / 显示物品与玩家名称   |
+  | CURSOR_LEFT              | 开关 gunfire aimbot（左上角"<"符号）   |
+  | CURSOR_UP                | 开关 crosshair triggerbot（左上角"^"） |
+  | CURSOR_DOWN              | 切换 hitbox：body/neck/head/none       |
+  | F6                       | dump r5apex                           |
+  | F7                       | 更新 offsets                          |
+  | F9（按两次）             | 退出                                  |
+
+6.6 memflow-kvm（README 7.4，可选——只在 nika 报
+  memflow-win32 错误时才装）
+
+```bash
+# 先启动进 tkg 内核，然后：
+cd "linux-tkg/RPMS"
+sudo dnf install kernel-devel-<版本>_tkg_eevdf-1.x86_64.rpm
+sudo dnf download dkms
+sudo rpm -i --nodeps dkms-3.4.3-2.fc44.noarch.rpm
+sudo wget https://github.com/memflow/memflow-kvm/releases/download/bin-kernel-6.19/memflow-source-only.dkms.tar.gz
+sudo dkms install --archive=memflow-source-only.dkms.tar.gz
+```
+
+  GRUB 追加 ibt=off → grub2-mkconfig → 重启 → 每次开机：
+
+```bash
+sudo modprobe memflow
+cd <仓库目录>
+sudo -E ./nika
+```
+
+----------------------------------------------------------------
+Phase 7：进阶伪装（防 HWID 封禁，研究向）
+----------------------------------------------------------------
+
+7.1 EDID 伪装（README 7.5）
+
+  背景：EAC 封禁研究表——公网 IP / 路由器 MAC / 显示器
+  EDID 都会被标记，显示器 EDID 是 HWID 的重要组成。
+
+  1. 下载 EDWriter（monitortests.com 论坛）
+  2. EDWriter → Read EDID → Save file → edidfile.bin
+  3. 下载 edidpatch.cmd 到 EDWriter 目录（VM 内）
+  4. 运行：edidpatch.cmd edidfile.bin
+  5. 把改过的 EDID 写入 Dummy/Passthrough（HDMI 欺骗器）：
+     采集卡接欺骗器，显示器指纹即改变
+
+  采集卡与欺骗器对照表（README 7.5）：
+  | 采集卡                | 欺骗器                     |
+  |-----------------------|----------------------------|
+  | HD60 S+               | Fueran HDMI-2K-2P          |
+  | HD60 X                | Fueran HDMI-2K-2P          |
+  | 4K60 Pro / MK.2       | Fueran HDMI-2K-4K          |
+
+7.2 GPU 伪装（README 7.6，实测 51x→58x 有效）
+
+  1. VM → Details → 每个直通的 PCI Host Device →
+     取消勾选 [ ] ROM BAR → Apply
+  2. nvidia-smi -L 记下旧 UUID
+  3. 开 VM，游戏前先跑一次 nika
+  4. 再看 nvidia-smi -L → UUID 已变化
+
+7.3 网络伪装（README 8，研究向）
+
+  - 本机与 ISP 路由器之间再加一级路由器（DD-WRT/OpenWRT）
+  - 关键点：要定期改的是 LAN 口 MAC（ARP 表 arp -a 里收集
+    的那个），不是 WAN/WLAN MAC
+  - 本地买路由器（认准品牌/型号/版本号刷机包）
+  - DD-WRT 改 LAN MAC（telnet 后）：
+
+```shell
+nvram set lan_hwaddr=XX:XX:XX:XX:XX:XX
+nvram get lan_hwaddr
+nvram commit
+reboot
+```
+
+  - DD-WRT → Setup → MAC Address Clone → 勾选 Enable →
+    克隆 WAN MAC 和 Wireless MAC → Save → 重启路由器
+
+  时机建议（实测结论）：网络伪装和 EDID 在未被封禁时
+  不必启用；封禁后再上。
+
+----------------------------------------------------------------
+Phase 8：日常更新与重编译
+----------------------------------------------------------------
+
+8.1 判断要不要重编译
 
 ```bash
 cd ~/nika        # 仓库目录
@@ -414,17 +1072,17 @@ git pull
 git log --oneline -10 -- intel619.mypatch qemupatch.sh kernelpatch619.sh ovmfpatch.sh
 ```
 
-  | 仓库更新了什么                          | 是否重编译 |
-  |-----------------------------------------|------------|
-  | intel619.mypatch / AMD 补丁 / kernelpatch619.sh | 重编内核 |
-  | qemupatch.sh                            | 重编 QEMU  |
-  | ovmfpatch.sh                            | 重编 OVMF  |
-  | nika.ini / README / 文档类              | 不用       |
+  | 仓库更新了什么                                  | 是否重编译 |
+  |-------------------------------------------------|------------|
+  | intel619.mypatch / AMD 补丁 / kernelpatch619.sh | 重编内核   |
+  | qemupatch.sh                                    | 重编 QEMU  |
+  | ovmfpatch.sh                                    | 重编 OVMF  |
+  | nika.ini / README / 文档类                      | 不用       |
 
   注意：如果 qemupatch.sh 上游改动和你本地填写的
   *_8086 / *_1022 设备 ID 冲突，git 合并时保留你本地的真机值。
 
-5.2 重编 QEMU
+8.2 重编 QEMU
 
 ```bash
 cd ~/nika
@@ -436,7 +1094,7 @@ ls -lh /usr/local/bin/qemu-system-x86_64   # 日期更新 = 成功
   - vars.sh 保留 → 设备 ID 不变，XML 不用改
   - VM 完全关机再启动，才用上新二进制
 
-5.3 重编内核
+8.3 重编内核
 
 ```bash
 cd ~/nika
@@ -453,11 +1111,11 @@ sudo reboot
      （kvm_intel / kvm_amd），否则开 VM 宿主机会卡死
   3. lspci -k -s 01:00 确认仍是 vfio-pci
 
-  若宿主机侧还编译了依赖内核版本的外部模块（如
-  memflow-kvm），需按新内核 vermagic 重编；只走 QEMU 通道
+  若宿主机侧编译了 memflow-kvm（dkms），换内核后需
+  modprobe memflow 或按 6.6 重装 dkms 包；只走 QEMU 通道
   读取 VM 内存则不受影响。
 
-5.4 重编 OVMF
+8.4 重编 OVMF
 
 ```bash
 cd ~/nika
@@ -476,8 +1134,8 @@ cd ~/nika
   | #  | 症状                              | 原因                        | 解法                                        |
   |----|-----------------------------------|-----------------------------|---------------------------------------------|
   | 1  | dnf groupinstall "Development Tools" 报错 | 新版 dnf 组名变化   | dnf group install development-tools        |
-  | 2  | libvirtd 每次重启都不运行          | 模块化 daemon 抢班          | 见 1.5，全部禁用                            |
-  | 3  | 编译依赖装不上 kernel-headers      | exclude=kernel* 锁太宽      | 用精确 exclude 列表（见 1.1）               |
+  | 2  | libvirtd 每次重启都不运行          | 模块化 daemon 抢班          | 见 1.9，全部禁用                            |
+  | 3  | 编译依赖装不上 kernel-headers      | exclude=kernel* 锁太宽      | 用精确 exclude 列表（见 1.6）               |
   | 4  | QEMU 编译在 mkvenv 阶段失败        | PyPI 被墙                   | /etc/pip.conf 配清华镜像 + rm -rf qemu/build |
   | 5  | 脚本最后打印了路径但文件不存在      | 脚本盲打，编译其实失败       | 只认 ls -lh /usr/local/bin/qemu-system-x86_64 |
   | 6  | kernel-headers 版本冲突            | 装过仓库版旧 headers        | 先 dnf remove 旧版再装 tkg 配套版            |
@@ -486,26 +1144,48 @@ cd ~/nika
   | 9  | 开 VM 时宿主机直接卡死、风扇狂转    | KVM 模块未加载              | depmod + modprobe kvm_intel / kvm_amd       |
   | 10 | git 克隆/子模块失败                | 网络被墙                    | git 全局 URL 重写走 gh-proxy（见 3.0）      |
   | 11 | dmidecode 敲错                     | 少个 m                      | dmidecode                                   |
-  | 12 | VM 装 NVIDIA 驱动报无兼容硬件       | 驱动检测不到直通卡          | 设备管理器手动 INF 安装（见 Phase 4）        |
-  | 13 | VM 里装完芯片组驱动包后键鼠直通失效 | 驱动包接管输入设备          | 安全模式卸载；不要装 SetupChipset 类驱动包   |
-  | 14 | VM 无声（Host is down）            | QEMU 无权访问用户会话       | qemu.conf 设 user="1000"，音频走 pipewire    |
-  | 15 | VM 内网络不通                      | 防火墙拦 virbr0             | 放行 virbr0                                 |
-  | 16 | VMAware 报 THREAD_MISMATCH         | CPU 拓扑与真机不符          | XML topology 填真机核数/线程数               |
-  | 17 | VMAware 报 timing anomalies        | vCPU 未绑核 / 调度抖动      | cputune 绑核 + GRUB 加 cpuset.sched_load_balance=0 processor.max_cstate=1 |
-  | 18 | VMAware 报 power capabilities       | VM 无休眠能力               | pm 启用 suspend-to-mem + 电池 SSDT acpitable |
-  | 19 | VM 拔电源仍显示充电中               | 电池表是静态假表             | 电池 SSDT 属伪装项，研究用途可接受            |
+  | 12 | VM 启动报 Bus 'ide.0' not found   | XML 用了自定义 SATA 控制器，残留 IDE 设备 | 删自动生成的 IDE CD-ROM，ISO 走 qemu:commandline |
+  | 13 | VM 装 NVIDIA 驱动报无兼容硬件       | 驱动检测不到直通卡          | 设备管理器手动 INF 安装（见 4.3）           |
+  | 14 | VM 里装完芯片组驱动包后键鼠直通失效 | 驱动包接管输入设备          | 安全模式卸载；别装 SetupChipset 类驱动包     |
+  | 15 | VM 无声（Host is down）            | QEMU 无权访问用户会话       | qemu.conf 设 user="1000"，音频走 pipewire    |
+  | 16 | VM 内网络不通                      | 防火墙拦 virbr0             | 放行 virbr0                                 |
+  | 17 | Steam 串流点连接无反应             | 防火墙未放行 virbr0 / CA 证书 | 6.3.3 的软链 + 防火墙放行                  |
+  | 18 | VMAware 报 THREAD_MISMATCH         | CPU 拓扑与真机不符          | XML topology 填真机核数/线程数（刀 5）       |
+  | 19 | VMAware 报 timing anomalies        | vCPU 未绑核 / 调度抖动      | cputune 绑核 + GRUB 加 cpuset.sched_load_balance=0 processor.max_cstate=1 |
+  | 20 | VMAware 报 power capabilities       | VM 无休眠能力               | pm 启用 suspend-to-mem + 电池 SSDT acpitable |
+  | 21 | VMAware 报 CPUID signatures        | hypervisor 位暴露           | 刀 5 全套 + 内核补丁 + msrs unknown=fault    |
+  | 22 | VMAware 报 virtual GPUs            | 存在虚拟显卡                | Video → Model: None（6.2）                  |
+  | 23 | VM 拔电源仍显示充电中               | 电池表是静态假表             | 电池 SSDT 属伪装项，研究用途可接受            |
+  | 24 | OVMF 固件改 pm 时报"找不到兼容 efi 固件" | firmware='efi' 属性与手动 loader 冲突 | XML 里 os 段手动写 loader/nvram，去掉 firmware='efi' 与 <firmware> 块 |
+  | 25 | nvidia-smi UUID 固定不变           | ROM BAR 暴露真卡指纹         | PCI Host Device 取消 ROM BAR（7.2）         |
 
 ----------------------------------------------------------------
-附录 B：关键文件位置
+附录 B：VMAware 2.6 检测项与对策（实测全绿）
+----------------------------------------------------------------
+
+  | 检测项               | 原理                            | 对策                                   |
+  |----------------------|---------------------------------|----------------------------------------|
+  | CPUID signatures     | CPUID hypervisor 位 / MSR 行为  | 刀 5 + kvm hidden + 内核补丁 + vmware metadata |
+  | THREAD_MISMATCH      | 拓扑核数与真机不符              | topology 真机规格（刀 5）               |
+  | timing anomalies     | 时钟源漂移 / 调度延迟           | tsc native + kvmclock off + cputune 绑核 + GRUB 参数 |
+  | power capabilities   | 无电池 / 无休眠                 | pm suspend-to-mem + ssdt 电池 acpitable |
+  | virtual GPUs         | 枚举到虚拟显示设备              | Video Model: None + 直通 GPU            |
+  | USB Host Device 风险 | 单 USB 设备直通暴露虚拟化痕迹    | 键鼠走 evdev 模拟，USB 走控制器级直通   |
+
+----------------------------------------------------------------
+附录 C：关键文件位置
 ----------------------------------------------------------------
 
   /usr/local/bin/qemu-system-x86_64        伪装 QEMU 二进制
+  /usr/local/bin/ssdt1.aml / ssdt2.aml     电池等 ACPI 表
   /usr/share/edk2/ovmf/OVMF_CODE_4M.patched.qcow2   伪装固件
   /usr/share/edk2/ovmf/OVMF_VARS_4M.patched.qcow2   NVRAM 模板
   /etc/libvirt/qemu/win10.xml              VM 配置（virsh edit win10）
   /etc/libvirt/qemu.conf                   QEMU 进程权限 / 设备 ACL
-  /etc/modprobe.d/kvm.conf                 KVM 模块参数
+  /etc/modprobe.d/kvm.conf                 KVM 模块参数 + vfio softdep
   /etc/default/grub                        内核启动参数
   ~/smbios.txt                             真机 SMBIOS 数据
   仓库目录/vars.sh                         QEMU 随机设备 ID（勿删）
   仓库目录/qemubackup/                     QEMU 干净源码备份（幂等重编用）
+  仓库目录/nika                            主程序（sudo -E ./nika）
+  仓库目录/nika.ini                        功能参数配置
