@@ -11,6 +11,23 @@
   <memory unit="KiB">12582912</memory>
   <currentMemory unit="KiB">12582912</currentMemory>
   <vcpu placement="static">12</vcpu>
+  <iothreads>1</iothreads>
+  <cputune>
+    <vcpupin vcpu="0" cpuset="0"/>
+    <vcpupin vcpu="1" cpuset="1"/>
+    <vcpupin vcpu="2" cpuset="2"/>
+    <vcpupin vcpu="3" cpuset="3"/>
+    <vcpupin vcpu="4" cpuset="4"/>
+    <vcpupin vcpu="5" cpuset="5"/>
+    <vcpupin vcpu="6" cpuset="6"/>
+    <vcpupin vcpu="7" cpuset="7"/>
+    <vcpupin vcpu="8" cpuset="8"/>
+    <vcpupin vcpu="9" cpuset="9"/>
+    <vcpupin vcpu="10" cpuset="10"/>
+    <vcpupin vcpu="11" cpuset="11"/>
+    <emulatorpin cpuset="0"/>
+    <iothreadpin iothread="1" cpuset="1"/>
+  </cputune>
   <os firmware="efi">
     <type arch="x86_64" machine="pc-q35-11.0">hvm</type>
     <firmware>
@@ -164,7 +181,7 @@
     <qemu:arg value="-smbios"/>
     <qemu:arg value="type=3,manufacturer=Acer,version=V1.29,serial=NHQ5FCN0039204EA7C212B00"/>
     <qemu:arg value="-smbios"/>
-    <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=8300,current-speed=2673"/>
+    <qemu:arg value="type=4,sock_pfx=U3E1,manufacturer=Intel(R) Corporation,version=Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz,max-speed=4500,current-speed=2600"/>
     <qemu:arg value="-smbios"/>
     <qemu:arg value="type=17,manufacturer=Kingston,part=ACR26D4S9S8ME-8,speed=2667,serial=E4370112"/>
     <qemu:arg value="-smbios"/>
