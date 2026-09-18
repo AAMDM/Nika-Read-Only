@@ -106,7 +106,7 @@ chmod +x headless.sh
 
 - Use VNC from smartphone, tablet, or laptop to connect.
 
-### 1.1. Install hardware decoder prior to libvirt and Steam
+### 1.1. Install hardware decoder prior to libvirt and Steam (not required, Steam removed)
 
 
 <details>
@@ -121,8 +121,12 @@ chmod +x headless.sh
   <summary>Hardware decoder with <b>AMD</b>:</summary>
 
     sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
-    sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld
+    sudo dnf swap mesa-va-drivers mesa-va-drivers-freeworld --allowerasing
 </details>
+
+- If your screen goes black, press `Ctrl+Alt+F3` and use your login:
+  - KDE: sudo systemctl enable plasmalogin && sudo systemctl start plasmalogin
+  - XFCE: sudo systemctl enable lightdm && sudo systemctl start lightdm
 
 
 <details>
@@ -357,7 +361,7 @@ GRUB_CMDLINE_LINUX="mitigations=auto ..."
       <qemu:arg value="-drive"/>
       <qemu:arg value="file=/var/lib/libvirt/images/win10.img,format=raw,cache=none,discard=ignore,if=none,id=drive-sata1-0"/>
       <qemu:arg value="-device"/>
-      <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,serial=YOUR_SERIAL_HERE"/>
+      <qemu:arg value="ide-hd,bus=device-sata1.0,drive=drive-sata1-0,id=sata1-0,rotation_rate=1,serial=YOUR_SERIAL_HERE"/>
     </qemu:commandline>
   ```
   </details>
